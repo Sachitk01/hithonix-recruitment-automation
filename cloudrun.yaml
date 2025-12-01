@@ -1,0 +1,68 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: hithonix-recruitment-api
+  namespace: ""
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "5"
+        run.googleapis.com/cloudsql-instances: ""
+    spec:
+      containers:
+        - image: gcr.io/YOUR_GCP_PROJECT/hithonix-recruitment-api:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: ENABLE_JOB_SCHEDULER
+              value: "true"
+            - name: RIVA_SA_JSON_CONTENT
+              valueFrom:
+                secretKeyRef:
+                  name: riva-sa-json
+                  key: service-account.json
+            - name: SLACK_RIVA_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: slack-riva-secrets
+                  key: bot-token
+            - name: SLACK_RIVA_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: slack-riva-secrets
+                  key: signing-secret
+            - name: SLACK_RIVA_DEFAULT_CHANNEL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: slack-riva-secrets
+                  key: default-channel
+            - name: SLACK_ARJUN_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: slack-arjun-secrets
+                  key: bot-token
+            - name: SLACK_ARJUN_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: slack-arjun-secrets
+                  key: signing-secret
+            - name: SLACK_ARJUN_DEFAULT_CHANNEL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: slack-arjun-secrets
+                  key: default-channel
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: api-key
+          resources:
+            limits:
+              memory: 1Gi
+              cpu: 1
