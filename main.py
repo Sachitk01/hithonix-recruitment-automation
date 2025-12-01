@@ -218,6 +218,23 @@ def healthz():
 
 
 # ------------------------------------------------------------------
+# Port debugging endpoint
+# ------------------------------------------------------------------
+@app.get("/debug-port")
+def debug_port():
+    env_port = os.getenv("PORT")
+    fallback_port = "8080"
+    resolved_port = env_port or fallback_port
+    return {
+        "env_port": env_port,
+        "fallback_port": fallback_port,
+        "resolved_port": resolved_port,
+        "uvicorn_command": "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}",
+        "host": "0.0.0.0",
+    }
+
+
+# ------------------------------------------------------------------
 # Slack test endpoint
 # ------------------------------------------------------------------
 @app.get("/slack-test")
