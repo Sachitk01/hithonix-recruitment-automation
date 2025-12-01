@@ -9,6 +9,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from slack_bots import RivaSlackBot, WORKING_PLACEHOLDER_TEXT
 from slack_service import SlackClient
@@ -80,11 +81,13 @@ async def slack_riva_events(request: Request):
     Supports both DMs and channel mentions.
     """
     payload = await request.json()
-    print("🔥 RIVA HANDLER REACHED")
-    print(payload)
 
     if payload.get("type") == "url_verification":
-        return {"challenge": payload["challenge"]}
+        challenge = payload.get("challenge")
+        return JSONResponse({"challenge": challenge})
+
+    print("🔥 RIVA HANDLER REACHED")
+    print(payload)
 
     event = payload.get("event", {}) or {}
     headers = request.headers
