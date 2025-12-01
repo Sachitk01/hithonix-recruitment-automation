@@ -8,11 +8,6 @@ import os
 from datetime import datetime
 from typing import Dict, Optional
 
-try:
-    from google.cloud import secretmanager
-except ImportError:  # pragma: no cover - optional dependency
-    secretmanager = None
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Request
@@ -26,61 +21,7 @@ from slack_riva import router as riva_router
 from slack_arjun import router as arjun_router
 
 
-SECRET_URI_PREFIX = "gcp-secret://"
-SECRET_ENV_VARS = [
-    "SLACK_RIVA_BOT_TOKEN",
-    "SLACK_RIVA_SIGNING_SECRET",
-    "SLACK_RIVA_DEFAULT_CHANNEL_ID",
-    "SLACK_RIVA_BOT_USER_ID",
-    "SLACK_ARJUN_BOT_TOKEN",
-    "SLACK_ARJUN_SIGNING_SECRET",
-    "SLACK_ARJUN_DEFAULT_CHANNEL_ID",
-    "SLACK_ARJUN_BOT_USER_ID",
-    "OPENAI_API_KEY",
-    "RIVA_SA_JSON",
-    "RIVA_SA_JSON_CONTENT",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "NGROK_AUTHTOKEN",
-]
-_secret_client = None
-secret_logger = logging.getLogger("secret_loader")
 slack_logger = logging.getLogger("slack")
-
-
-def _maybe_hydrate_secret(var_name: str) -> None:
-    raw_value = os.getenv(var_name)
-    if not raw_value or not raw_value.startswith(SECRET_URI_PREFIX):
-        return
-
-    if secretmanager is None:
-        secret_logger.warning(
-            "google-cloud-secret-manager not installed; cannot resolve %s",
-            var_name,
-        )
-        return
-
-    project_id = os.getenv("GCP_SECRET_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT")
-    if not project_id:
-        secret_logger.warning("No project id set for Secret Manager while resolving %s", var_name)
-        return
-
-    secret_name = raw_value.replace(SECRET_URI_PREFIX, "", 1)
-    global _secret_client
-    if _secret_client is None:
-        _secret_client = secretmanager.SecretManagerServiceClient()
-
-    name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
-    try:
-        response = _secret_client.access_secret_version(name=name)
-        secret_value = response.payload.data.decode("utf-8")
-        os.environ[var_name] = secret_value
-        secret_logger.info("Loaded secret %s from Google Secret Manager", var_name)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        secret_logger.warning("Failed to load secret %s: %s", var_name, exc)
-
-
-for _env in SECRET_ENV_VARS:
-    _maybe_hydrate_secret(_env)
 
 
 # Request Logging Middleware

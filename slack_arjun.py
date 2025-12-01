@@ -79,7 +79,10 @@ async def slack_arjun_events(request: Request):
     Unified Slack event handler for Arjun.
     Supports both DMs and channel mentions.
     """
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
 
     if payload.get("type") == "url_verification":
         challenge = payload.get("challenge")
