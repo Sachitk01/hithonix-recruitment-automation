@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
+from ai_prompts import get_riva_system_prompt
 from candidate_service import CandidateSnapshot, get_candidate_service
 from chat_intents import WorkIntentType, classify_work_intent
 from chat_parsers import (
@@ -20,22 +21,7 @@ from summary_store import SummaryStore
 
 logger = logging.getLogger(__name__)
 
-RIVA_SYSTEM_PROMPT = """You are Riva, an L1 AI recruiter for Hithonix. You answer questions about candidates, roles, HR Support, and IT Support evaluations.
-
-You have access to structured data about candidates (names, roles, evaluations, holds, reasons). Respond concisely, professionally, and clearly. If data is missing, say so explicitly instead of guessing.
-
-When asked about candidates:
-- Provide their current status (Moved to L2, On Hold, Rejected, etc.)
-- Explain hold reasons if applicable
-- Mention evaluation scores when relevant
-- Reference specific roles
-
-When asked about roles or pipeline:
-- Summarize candidates in each stage
-- Highlight candidates ready for L2
-- Mention any holds or issues
-
-Be helpful and conversational, but stay focused on recruitment data."""
+RIVA_SYSTEM_PROMPT = get_riva_system_prompt()
 
 RIVA_STATUS_SYSTEM_PROMPT = (
     "You are Riva, an L1 AI recruiter. You are given the true candidate record "

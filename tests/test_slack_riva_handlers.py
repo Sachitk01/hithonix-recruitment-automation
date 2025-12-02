@@ -53,14 +53,14 @@ async def test_riva_dm_sends_ack_and_runs_pipeline(monkeypatch):
         "channel_type": "im",
         "user": "U123",
         "channel": "D123",
-        "text": "help",
+        "text": "Evaluate Priya for HR Support",
     }
 
     await handlers.handle_riva_event(event)
 
     assert ack_client.calls
     assert ack_client.calls[0]["channel"] == "D123"
-    assert pipeline_calls == [("help", "D123", "U123")]
+    assert pipeline_calls == [("Evaluate Priya for HR Support", "D123", "U123")]
 
 
 async def test_riva_dm_pipeline_error_posts_message(monkeypatch, caplog):
@@ -80,7 +80,7 @@ async def test_riva_dm_pipeline_error_posts_message(monkeypatch, caplog):
         "channel_type": "im",
         "user": "U123",
         "channel": "D123",
-        "text": "help",
+        "text": "Evaluate Priya for HR Support",
     }
 
     with caplog.at_level("ERROR"):
@@ -168,3 +168,67 @@ async def test_riva_channel_messages_do_not_trigger_dm_flow(monkeypatch):
 
     assert not ack_client.calls
     assert pipeline_called is False
+
+
+async def test_riva_greeting_sends_single_message(monkeypatch):
+    monkeypatch.setattr(handlers, "_riva_web_client", StubWebClient())
+
+    slack_client = StubSlackClient()
+    monkeypatch.setattr(handlers, "riva_slack_client", slack_client)
+
+    send_ack_called = False
+
+    async def fail_ack(*_):
+        nonlocal send_ack_called
+        send_ack_called = True
+
+    monkeypatch.setattr(handlers, "_send_ack", fail_ack)
+
+    def fail_pipeline(*_):  # pragma: no cover - sanity guard
+        raise AssertionError("pipeline should not run for greetings")
+
+    monkeypatch.setattr(handlers, "_run_riva_pipeline", fail_pipeline)
+
+    event = {
+        "type": "message",
+        "channel_type": "im",
+        "user": "U123",
+        "channel": "D123",
+        "text": "Hi Riva",
+    }
+
+    await handlers.handle_riva_event(event)
+
+    assert slack_client.calls
+    assert "Riva" in slack_client.calls[0]["text"]
+    assert send_ack_called is False
+
+
+async def test_riva_help_message_without_ack(monkeypatch):
+    monkeypatch.setattr(handlers, "_riva_web_client", StubWebClient())
+
+    slack_client = StubSlackClient()
+    monkeypatch.setattr(handlers, "riva_slack_client", slack_client)
+
+    async def fail_ack(*_):  # pragma: no cover - ensure ack not called
+        raise AssertionError("_send_ack should not run for help")
+
+    monkeypatch.setattr(handlers, "_send_ack", fail_ack)
+
+    def fail_pipeline(*_):  # pragma: no cover - ensure pipeline not triggered
+        raise AssertionError("pipeline should not run for help")
+
+    monkeypatch.setattr(handlers, "_run_riva_pipeline", fail_pipeline)
+
+    event = {
+        "type": "message",
+        "channel_type": "im",
+        "user": "U123",
+        "channel": "D123",
+        "text": "help",
+    }
+
+    await handlers.handle_riva_event(event)
+
+    assert slack_client.calls
+    assert "Riva" in slack_client.calls[0]["text"]

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
+from ai_prompts import get_arjun_system_prompt
 from candidate_service import CandidateSnapshot, get_candidate_service
 from chat_intents import WorkIntentType, classify_work_intent
 from chat_parsers import (
@@ -22,9 +23,7 @@ from summary_store import SummaryStore
 
 logger = logging.getLogger(__name__)
 
-ARJUN_SYSTEM_PROMPT = """You are Arjun, an L2 AI recruiter for Hithonix.
-You answer questions about candidates, L2 evaluations, and final hiring recommendations.
-Explain decisions clearly, lean on structured data, and be transparent when data is missing."""
+ARJUN_SYSTEM_PROMPT = get_arjun_system_prompt()
 
 ARJUN_STATUS_SYSTEM_PROMPT = (
     "You are Arjun, responsible for L2 evaluations and leadership readiness. "

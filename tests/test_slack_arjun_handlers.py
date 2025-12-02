@@ -53,14 +53,14 @@ async def test_arjun_dm_sends_ack_and_runs_pipeline(monkeypatch):
         "channel_type": "im",
         "user": "U123",
         "channel": "D123",
-        "text": "hi",
+        "text": "Please do an L2 deep dive",
     }
 
     await handlers.handle_arjun_event(event)
 
     assert ack_client.calls
     assert ack_client.calls[0]["channel"] == "D123"
-    assert pipeline_calls == [("hi", "D123", "U123")]
+    assert pipeline_calls == [("Please do an L2 deep dive", "D123", "U123")]
 
 
 async def test_arjun_dm_pipeline_error_posts_message(monkeypatch, caplog):
@@ -80,7 +80,7 @@ async def test_arjun_dm_pipeline_error_posts_message(monkeypatch, caplog):
         "channel_type": "im",
         "user": "U123",
         "channel": "D123",
-        "text": "hi",
+        "text": "Please do an L2 deep dive",
     }
 
     with caplog.at_level("ERROR"):
@@ -167,3 +167,63 @@ async def test_arjun_channel_messages_do_not_trigger_dm_flow(monkeypatch):
 
     assert not ack_client.calls
     assert pipeline_called is False
+
+
+async def test_arjun_greeting_sends_single_message(monkeypatch):
+    monkeypatch.setattr(handlers, "_arjun_web_client", StubWebClient())
+
+    slack_client = StubSlackClient()
+    monkeypatch.setattr(handlers, "arjun_slack_client", slack_client)
+
+    async def fail_ack(*_):  # pragma: no cover - ensure ack skipped
+        raise AssertionError("_send_ack should not run for greeting")
+
+    monkeypatch.setattr(handlers, "_send_ack", fail_ack)
+
+    def fail_pipeline(*_):  # pragma: no cover - ensure pipeline skipped
+        raise AssertionError("pipeline should not run for greeting")
+
+    monkeypatch.setattr(handlers, "_run_arjun_pipeline", fail_pipeline)
+
+    event = {
+        "type": "message",
+        "channel_type": "im",
+        "user": "U123",
+        "channel": "D123",
+        "text": "Hello Arjun",
+    }
+
+    await handlers.handle_arjun_event(event)
+
+    assert slack_client.calls
+    assert "Arjun" in slack_client.calls[0]["text"]
+
+
+async def test_arjun_help_message_without_ack(monkeypatch):
+    monkeypatch.setattr(handlers, "_arjun_web_client", StubWebClient())
+
+    slack_client = StubSlackClient()
+    monkeypatch.setattr(handlers, "arjun_slack_client", slack_client)
+
+    async def fail_ack(*_):  # pragma: no cover - ensure ack skipped
+        raise AssertionError("_send_ack should not run for help")
+
+    monkeypatch.setattr(handlers, "_send_ack", fail_ack)
+
+    def fail_pipeline(*_):  # pragma: no cover - ensure pipeline skipped
+        raise AssertionError("pipeline should not run for help")
+
+    monkeypatch.setattr(handlers, "_run_arjun_pipeline", fail_pipeline)
+
+    event = {
+        "type": "message",
+        "channel_type": "im",
+        "user": "U123",
+        "channel": "D123",
+        "text": "help",
+    }
+
+    await handlers.handle_arjun_event(event)
+
+    assert slack_client.calls
+    assert "Arjun" in slack_client.calls[0]["text"]

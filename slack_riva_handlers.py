@@ -11,6 +11,7 @@ from anyio import to_thread
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from decision_engine import Intent, decide_intent
 from slack_bots import RivaSlackBot
 from slack_service import SlackClient
 
@@ -35,6 +36,40 @@ riva_slack_client = SlackClient(
 )
 
 riva_bot = RivaSlackBot(slack_client=riva_slack_client)
+
+RIVA_GREETING_MESSAGE = (
+    "Hello! I’m Riva, your L1 recruitment assistant. I can evaluate candidates, summarize resumes or JDs, "
+    "and share quick L1 insights. What would you like to do?"
+)
+
+RIVA_HELP_MESSAGE = (
+    "I’m Riva – your L1 recruitment assistant. I can:"
+    "\n1) Evaluate a candidate for a role"
+    "\n2) Summarize a resume or interview transcript"
+    "\n3) Check L1 batch status or pipeline readiness"
+    "\n4) Extract JD must-haves"
+    "\n5) Answer quick L1 questions\n"
+    "Try: “Evaluate John Doe for the HR Support role” or “Summarize this JD.”"
+)
+
+RIVA_UNSURE_MESSAGE = (
+    "I’m not sure what you need yet. Try one of these formats:\n"
+    "• “Evaluate Priya Shah for the IT Support role”\n"
+    "• “Summarize this resume”\n"
+    "• “What did you run for L1 today?”"
+)
+
+RIVA_SMALL_TALK_MESSAGE = (
+    "Thanks for the note! Whenever you need me, try something like "
+    "“Evaluate Jane Doe for the HR Support role” or “Summarize this JD.”"
+)
+
+_RIVA_PIPELINE_INTENTS = {
+    Intent.L1_EVAL_SINGLE,
+    Intent.L1_EVAL_BATCH_STATUS,
+    Intent.PIPELINE_STATUS,
+    Intent.DEBUG,
+}
 
 
 async def handle_riva_event(event: Dict[str, Any]) -> None:
@@ -79,6 +114,39 @@ async def _handle_riva_dm(event: Dict[str, Any]) -> None:
     user = event.get("user")
     text = (event.get("text") or "").strip()
 
+    decision = decide_intent(text, bot="RIVA")
+    logger.info(
+        "riva_dm_decision",
+        extra={
+            "intent": decision.intent.value,
+            "confidence": decision.confidence,
+            "channel": channel,
+            "user": user,
+            "notes": decision.notes,
+            "text": text,
+        },
+    )
+
+    if decision.intent == Intent.GREETING:
+        _post_riva_message(channel, RIVA_GREETING_MESSAGE)
+        return
+
+    if decision.intent == Intent.HELP:
+        _post_riva_message(channel, RIVA_HELP_MESSAGE)
+        return
+
+    if decision.intent == Intent.SMALL_TALK:
+        _post_riva_message(channel, RIVA_SMALL_TALK_MESSAGE)
+        return
+
+    if decision.intent == Intent.UNKNOWN:
+        _post_riva_message(channel, RIVA_UNSURE_MESSAGE)
+        return
+
+    if decision.intent not in _RIVA_PIPELINE_INTENTS:
+        _post_riva_message(channel, RIVA_UNSURE_MESSAGE)
+        return
+
     await _send_ack(channel, user)
     try:
         await to_thread.run_sync(_run_riva_pipeline, text, channel, user)
@@ -116,6 +184,11 @@ async def _send_ack(channel: Optional[str], user: Optional[str]) -> None:
             "riva_ack_failed",
             extra={"channel": channel, "user": user, "error": exc.response.get("error")},
         )
+
+
+def _post_riva_message(channel: Optional[str], text: str) -> None:
+    if channel and riva_slack_client:
+        riva_slack_client.post_message(text, channel=channel)
 
 
 def _run_riva_pipeline(text: str, channel: Optional[str], user: Optional[str]) -> None:
