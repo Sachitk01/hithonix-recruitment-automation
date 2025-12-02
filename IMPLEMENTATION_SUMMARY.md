@@ -77,7 +77,7 @@ export ENABLE_JOB_SCHEDULER=false  # optional: disable cron while developing
 .venv/bin/python -m uvicorn main:app --reload --port 8000
 ```
 - Omit the `ENABLE_JOB_SCHEDULER` override (or set it to `true`) to let the cron jobs run automatically on startup.
-- FastAPI serves Slack endpoints (`/slack/riva`, `/slack/arjun`), batch triggers, and health checks once uvicorn is running.
+- FastAPI serves Slack endpoints (Events: `/slack-riva/events`, `/slack-arjun/events`; Slash: `/slack/riva`, `/slack/arjun`), batch triggers, and health checks once uvicorn is running.
 
 ### Trigger batches manually via HTTP
 With the API running on `http://127.0.0.1:8000`:

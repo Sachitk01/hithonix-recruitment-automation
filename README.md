@@ -1,96 +1,238 @@
 # Hithonix Recruitment Automation
 
-FastAPI service orchestrating the Riva L1 and Arjun L2 pipelines for candidate screening, Drive normalization, Slack notifications, and scheduled batch runs.
+FastAPI + Slack automation that evaluates candidates in Google Drive, orchestrates Riva L1 and Arjun L2 review loops, and surfaces actions through Slack bots and scheduled Cloud Run jobs.
 
-## Architecture overview
-1. **Normalizer ➜ Riva L1 ➜ Arjun L2**: Candidate folders in Drive are normalized, evaluated at L1 (Riva), then promoted to L2 (Arjun) for final decisions.
-2. **Slack bots**: `@Riva` and `@Arjun` respond to slash commands for summaries, ready-for-L2 lists, hires, and historical stats.
-3. **Schedulers**: Cron jobs trigger L1 twice daily (13:00 & 21:00) and L2 twice daily (16:00 & 23:00) via Cloud Scheduler hitting `/run-l1-batch` and `/run-l2-batch`.
-4. **Cloud Run**: Production deployment is containerized and deployed via Cloud Run with healthchecks, secret hydration, and GitHub Actions automation.
+## TL;DR
 
-## Environment configuration & secrets
-1. Copy `.env.example` to `.env` for local development.
-2. Any variable can be set to `gcp-secret://<secret-name>`; at runtime `main.py` exchanges it via Google Secret Manager when `GOOGLE_CLOUD_PROJECT` or `GCP_SECRET_PROJECT` is defined.
-3. Recommended secret list:
+- **What it does** – Normalizes Drive folders, runs L1/L2 AI evaluations, updates Google Sheets, and lets recruiters drive workflows from Slack.
+- **How it runs** – Containerized FastAPI service deployed to Cloud Run (gen2), backed by Google Secret Manager, Cloud Scheduler, and GitHub Actions.
+- **How to work on it** – Install dependencies with `pip`, run `./dev.sh` for ngrok + uvicorn, run tests with `pytest`, deploy with `cloudrun_build_and_deploy.sh` or `cloudrun.yaml`.
+
+## Table of contents
+
+1. [System overview](#system-overview)
+2. [Architecture & flow](#architecture--flow)
+3. [Technology stack](#technology-stack)
+4. [Repository layout](#repository-layout)
+5. [Environment & secrets](#environment--secrets)
+6. [Local development](#local-development)
+7. [Slack integration](#slack-integration)
+8. [Batch jobs & schedulers](#batch-jobs--schedulers)
+9. [Testing & quality](#testing--quality)
+10. [Deployment & operations](#deployment--operations)
+11. [Monitoring & troubleshooting](#monitoring--troubleshooting)
+12. [Handover checklist](#handover-checklist)
+13. [Reference documents](#reference-documents)
+
+## System overview
+
+The service ingests candidate data from Google Drive, applies AI-driven evaluation at two stages (Riva L1 and Arjun L2), routes folders automatically, persists structured outputs, and exposes controls via Slack and HTTP endpoints. Everything runs inside a single FastAPI app (`main.py`) with routers for Slack bots, batch triggers, and health checks.
+
+### Core capabilities
+
+- **Normalization & inference pipelines** – `normalizer.py`, `riva_l1` and `arjun_l2` packages parse Drive artifacts, build prompts, and evaluate candidates via OpenAI APIs.
+- **Slack assistants** – `slack_riva.py` and `slack_arjun.py` expose slash-command style interactions for recruiters.
+- **Batch jobs** – `batch_jobs.py` coordinates daily runs and can be triggered manually or via Cloud Scheduler.
+- **Memory layer** – `memory_service.py` (SQLAlchemy) keeps longitudinal candidate + role context for smarter prompts.
+- **Observability hooks** – structured logging, `/debug-port`, `/health`, and Slack notifications for success/failure.
+
+## Architecture & flow
+
+```
+Google Drive ➜ Normalizer ➜ Riva L1 ➜ Sheets/Drive updates
+                                         ↘ send-to-L2 ➜ Arjun L2 ➜ Final routing
+
+Slack (events + slash commands) ───────────────┐
+                                              │
+Cloud Scheduler (HTTP POST jobs) ───────▶ FastAPI/Cloud Run ◀── Secret Manager
+                                              │
+                                   Google Sheets & Memory DB
+```
+
+Key points:
+
+1. **FastAPI gateway** – All HTTP traffic (Slack events, batch triggers, health checks) lands in `main.py`. Request logging middleware tags requests with a friendly `actor` label for easier debugging.
+2. **Slack routers** – `slack_riva.py` & `slack_arjun.py` verify Slack requests (type `url_verification`, retries, bot-echo ignores) and hand off to `slack_bots.py` for business logic.
+3. **Pipelines** – `riva_l1` and `arjun_l2` folders encapsulate evaluation prompts, models, and services. Decisions, status files, and Drive routing live in `decision_store.py`, `riva_output_writer.py`, etc.
+4. **Persistence** – Memory layer defaults to SQLite; set `MEMORY_DB_URL` for Postgres when running in Cloud SQL.
+5. **Automation** – `cloud_scheduler_commands.sh` (or Terraform) posts to `/run-l1-batch` and `/run-l2-batch` twice daily; Slack bots announce summaries.
+
+## Technology stack
+
+| Layer | Technology |
+| --- | --- |
+| API & background jobs | FastAPI, APScheduler |
+| Language/runtime | Python 3.11, Uvicorn |
+| AI providers | OpenAI GPT models (via `riva_l1_service.py`, `arjun_l2_service.py`) |
+| Storage | Google Drive (artifacts), Google Sheets (dashboards), SQLite/Postgres memory DB |
+| Messaging/UI | Slack bots (Events API + Web API) |
+| Deployment | Docker, Cloud Run (Gen2), GitHub Actions |
+| Automation | Cloud Scheduler, Terraform (optional) |
+| Secrets | Google Secret Manager |
+
+## Repository layout
+
+```
+├── main.py                     # FastAPI entrypoint
+├── batch_jobs.py               # Orchestrates L1/L2 batches
+├── riva_l1/, arjun_l2/         # Pipeline prompts, services, decision engines
+├── slack_riva.py, slack_arjun.py
+├── slack_service.py / slack_bots.py
+├── drive_service.py / folder_resolver.py / normalizer.py
+├── memory_service.py / memory_config.py
+├── requirements*.txt
+├── tests/                      # pytest suites (Slack, memory, decision logic…)
+├── cloudrun.yaml               # Declarative deployment manifest
+├── cloudrun_build_and_deploy.sh
+├── cloud_scheduler_commands.sh / terraform/
+└── docs/ (see PROJECT_DOCUMENT.md below)
+```
+
+## Environment & secrets
+
+1. Copy `.env.example` to `.env` for local runs. `dev.sh` loads it automatically.
+2. Sensitive values live in **Google Secret Manager** and are injected into Cloud Run via `env.yaml` (see sample names below). Secret references may also use the `gcp-secret://` notation locally if `GOOGLE_APPLICATION_CREDENTIALS` is configured.
+3. Required secrets/vars:
    - `OPENAI_API_KEY`
-   - `RIVA_SA_JSON_CONTENT` *(Drive service account)*
-   - `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_*_CHANNEL_ID`
-   - `NGROK_AUTHTOKEN`
-4. To store secrets:
-   ```bash
-   gcloud secrets create openai-api-key --replication-policy=automatic
-   echo "sk-..." | gcloud secrets versions add openai-api-key --data-file=-
-   ```
-   Then set `OPENAI_API_KEY=gcp-secret://openai-api-key` in `.env` or Cloud Run variables.
+   - `RIVA_SA_JSON_CONTENT` (Drive service account JSON)
+   - `SLACK_RIVA_*` and `SLACK_ARJUN_*` (bot tokens, signing secrets, app tokens, default channel IDs, bot user IDs)
+   - `RECRUITER_SHEET_FILE_ID`, `RAW_LOG_SHEET_NAME`, `DASHBOARD_SHEET_NAME`
+   - Optional: `ENABLE_JOB_SCHEDULER`, `MEMORY_*` flags, `NGROK_*` for local testing.
 
-## Talent Intelligence Memory Layer
-- **Persistence**: `memory_service.py` uses SQLAlchemy (SQLite by default) to persist `CandidateProfile`, `CandidateEvent`, `RoleProfile`, and override logs. Tables auto-create on startup; switch to Postgres by setting `MEMORY_DB_URL`.
-- **Config flags** (`.env`):
-   - `MEMORY_ENABLED=true|false`
-   - `MEMORY_SCOPE=candidate_only|role_only|full`
-   - `MEMORY_DB_URL=sqlite:///./talent_memory.db`
-- **Structured outputs**: `evaluation_models.py` + `evaluation_converters.py` validate every Riva L1 and Arjun L2 response before Sheets/Drive writes and memory persistence.
-- **Runtime wiring**:
-   - L1 pulls prior `CandidateProfile` + `RoleProfile` context into the LLM prompt, logs whether context was available, and appends `CandidateEvent` entries with hashed inputs/artifacts.
-   - L2 loads the last L1 event + role rubric, computes `alignment_with_l1`, updates final candidate outcome, and persists its own events.
-- **Safety**: When the DB is unreachable or memory is disabled, pipelines continue statelessly while logging the fallback.
+### Managing secrets
 
-## Running locally
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-./dev.sh
-```
-- `dev.sh` automatically disables the scheduler, starts uvicorn, launches ngrok, and prints the public HTTPS URL for Slack slash commands.
-- Ensure `NGROK_AUTHTOKEN` is set (or reserve a domain via `NGROK_DOMAIN`) for stable callbacks.
+gcloud secrets create openai-api-key --replication-policy=automatic
+echo "sk-..." | gcloud secrets versions add openai-api-key --data-file=-
 
-## Testing
-```bash
-./run_tests.sh all
+gcloud secrets add-iam-policy-binding openai-api-key \
+  --member="serviceAccount:<cloud-run-sa>@hithonix-recruitment-ai.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
 ```
-> Uses pytest to execute Normalizer, Scheduler, Slack bot, and batch coverage.
 
-## Deploying to Cloud Run
-1. **Manual CLI**
+Update `env.yaml` to reference secrets via `valueFrom.secretKeyRef` (already configured in this repo). Re-run `gcloud run services replace env.yaml` after any change.
+
+## Local development
+
+1. **Prerequisites** – Python 3.11, Docker (optional), ngrok (for Slack callbacks), `gcloud` CLI.
+2. **Bootstrap environment**
    ```bash
-   export PROJECT_ID=your-gcp-project
-   export REGION=us-central1
-   ./cloudrun_build_and_deploy.sh
+   python3 -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
    ```
-2. **GitHub Actions** (`.github/workflows/deploy-cloudrun.yml`)
-   - Configure repository secrets: `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_SA_EMAIL`, `GCP_WORKLOAD_IDENTITY_PROVIDER`.
-   - On pushes to `main`, the workflow builds, pushes, and deploys the container to Cloud Run.
-3. **Service manifest**: `cloudrun.yaml` documents resource settings, env vars, and Secret Manager bindings for declarative deployments.
+3. **Start the dev workflow**
+   ```bash
+   ./dev.sh
+   ```
+   - Spins up uvicorn with auto-reload on `http://127.0.0.1:8000`.
+   - Disables the in-process scheduler to avoid duplicate cron runs.
+   - Launches ngrok and prints the public HTTPS URL for Slack testing.
+4. **Manual start (no script)**
+   ```bash
+   export ENABLE_JOB_SCHEDULER=false
+   uvicorn main:app --reload --port 8000
+   ```
 
 ## Slack integration
-1. In Slack API dashboard create a Slack App with slash commands pointing to the ngrok / Cloud Run URL (`/slack/riva`, `/slack/arjun`).
-2. Configure the bot token, signing secret, and channel IDs in Secret Manager or `.env`.
-3. For testing, run `./dev.sh` and update command manifests with the fresh ngrok URL printed by the script.
-4. Production Slack requests should target the Cloud Run URL (e.g., `https://hithonix...a.run.app/slack/riva`).
 
-## Cloud Scheduler (cron) setup
-- **One-off CLI**: `cloud_scheduler_commands.sh` issues four gcloud commands to create POST jobs hitting `/run-l1-batch` and `/run-l2-batch` at 13:00/21:00 and 16:00/23:00 UTC respectively.
-- **Infrastructure as Code**: `terraform/cloud_scheduler.tf` provisions the same jobs. Provide `project_id`, `region`, `service_url`, and `invoker_service_account` variables.
-- Grant the scheduler service account the *Cloud Run Invoker* role.
+**Production Cloud Run base URL:** `https://hithonix-recruitment-automation-382401344182.asia-southeast1.run.app`
 
-## Local Slack testing workflow
-1. Run `./dev.sh` to launch uvicorn + ngrok.
-2. Copy the printed `https://....ngrok.app` URL.
-3. Update Slack slash command manifest and interactive components to point at `https://.../slack/riva` and `/slack/arjun`.
-4. Exercise commands directly from Slack; logs stream in the terminal.
+| Bot  | Slack Events API URL | Slash command URL |
+| --- | --- | --- |
+| **Riva**  | `https://hithonix-recruitment-automation-382401344182.asia-southeast1.run.app/slack-riva/events` | `https://hithonix-recruitment-automation-382401344182.asia-southeast1.run.app/slack/riva` |
+| **Arjun** | `https://hithonix-recruitment-automation-382401344182.asia-southeast1.run.app/slack-arjun/events` | `https://hithonix-recruitment-automation-382401344182.asia-southeast1.run.app/slack/arjun` |
 
-## Updating Slack manifests
-- Keep a copy of your Slack App manifest (JSON/YAML) and update the Request URLs to either the ngrok URL (development) or Cloud Run URL (production).
-- Recommended endpoints:
-  - Slash Command `@Riva`: `POST /slack/riva`
-  - Slash Command `@Arjun`: `POST /slack/arjun`
-  - Optional interactivity: `POST /slack/riva`
+1. Create two Slack Apps (or one app with two bots) via api.slack.com.
+2. Configure Event Subscriptions with the URLs above. Slack will send a `url_verification` challenge that the routers already handle.
+3. Configure Slash Commands (`/riva`, `/arjun`) pointing to the production URLs above (or your ngrok tunnel while developing).
+4. Store tokens/secrets in Secret Manager or `.env`.
+5. When Slack retries, the routers short-circuit using `X-Slack-Retry-Num`; no extra setup needed.
 
-## Manual batch triggers & healthchecks
-- `POST /run-l1-batch` – trigger Riva L1 batch immediately (requires Drive + OpenAI credentials).
-- `POST /run-l2-batch` – trigger Arjun L2 batch immediately.
-- `GET /health` or `GET /healthz` – used by Cloud Run and load balancers for health verification.
+### Slack configuration checklist
 
-## Additional references
-- `IMPLEMENTATION_SUMMARY.md` – deep-dive on workflow, artifacts, Slack commands, cron timing, and env vars.
-- `cloudrun.yaml`, `.github/workflows/deploy-cloudrun.yml`, `cloud_scheduler_commands.sh`, and `terraform/cloud_scheduler.tf` – infrastructure tooling.
+- **Riva bot**
+   - Event Subscriptions → Request URL = `.../slack-riva/events`
+   - Subscribe to bot events: `message.im`, `app_mention`
+   - Slash Command `/riva` → Request URL = `.../slack/riva`
+- **Arjun bot**
+   - Event Subscriptions → Request URL = `.../slack-arjun/events`
+   - Subscribe to bot events: `message.im`, `app_mention`
+   - Slash Command `/arjun` → Request URL = `.../slack/arjun`
+
+### Supported commands
+
+See [`IMPLEMENTATION_SUMMARY.md`](./IMPLEMENTATION_SUMMARY.md#slack-commands) for the full matrix of `summary`, `ready-for-l2`, `hires`, `last-run-summary`, etc.
+
+## Batch jobs & schedulers
+
+- `batch_jobs.py` exposes `run_riva_l1_batch` and `run_arjun_l2_batch`, which the HTTP endpoints `/run-l1-batch` and `/run-l2-batch` invoke.
+- APScheduler registers the same jobs when `ENABLE_JOB_SCHEDULER=true` (disabled in dev via `dev.sh`).
+- Cloud Scheduler jobs (13:00 & 21:00 for L1, 16:00 & 23:00 for L2 UTC) call the HTTP endpoints using a service account with `roles/run.invoker`.
+- Provision schedulers via `cloud_scheduler_commands.sh` or Terraform (`terraform/cloud_scheduler.tf`).
+
+## Testing & quality
+
+```bash
+./run_tests.sh all          # wrapper
+# or
+.venv/bin/python -m pytest tests -v
+```
+
+Test suites cover Slack bots, decision engines, evaluation converters, memory service, and batch orchestration. Add new tests under `tests/` and keep them runnable via `pytest` with zero external dependencies (Drive/Slack calls are mocked).
+
+## Deployment & operations
+
+### Container build & deploy (scripted)
+
+```bash
+export PROJECT_ID=hithonix-recruitment-ai
+export REGION=asia-south1
+./cloudrun_build_and_deploy.sh
+```
+
+The script builds the Docker image, pushes to Artifact Registry, and deploys to Cloud Run using the same command sequence as GitHub Actions.
+
+### Declarative deploy
+
+`cloudrun.yaml` / `env.yaml` capture the service spec (image, CPU/memory, min/max instances, env vars). Deploy with:
+
+```bash
+gcloud run services replace env.yaml --region=asia-south1
+```
+
+### GitHub Actions
+
+- See `.github/workflows/deploy-cloudrun.yml` (create `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_SA_EMAIL`, `GCP_WORKLOAD_IDENTITY_PROVIDER` secrets).
+- On push to `main`, the workflow builds, pushes, and deploys automatically.
+
+### IAM & networking
+
+- **Public ingress**: allow unauthenticated invocations with `gcloud run services add-iam-policy-binding ... --member="allUsers"` if Slack/OpenAI must call directly.
+- **Private ingress**: remove that binding and issue ID tokens via service accounts for internal callers.
+- Keep the runtime service account minimal (Secret Manager Accessor, Cloud Logging Writer, Cloud Trace Writer, Cloud Run Invoker by Cloud Scheduler SA).
+
+## Monitoring & troubleshooting
+
+- **Health checks** – `GET /health` and `/healthz` for Cloud Run probes.
+- **Port debugging** – `GET /debug-port` returns the resolved `PORT` plus helpful metadata when diagnosing Cloud Run ingress.
+- **Logs** – Structured logs include `actor`, request IDs, and Slack-related metadata. Filter in Cloud Logging by `logName="projects/<project>/logs/run.googleapis.com%2Frequests"`.
+- **Common issues**
+  - *Slack URL verification fails* → ensure `/slack-riva/events` is reachable and service allows unauthenticated traffic.
+  - *403 from Cloud Run* → missing `roles/run.invoker` binding.
+  - *Secret access denied* → grant `roles/secretmanager.secretAccessor` to the Cloud Run runtime service account for each secret ID.
+
+## Handover checklist
+
+- [ ] Rotate OpenAI, Slack, and service-account secrets after onboarding a new maintainer.
+- [ ] Confirm Cloud Run IAM (public vs private) matches the Slack/OpenAI integration approach.
+- [ ] Verify Cloud Scheduler jobs exist and are hitting the correct URLs.
+- [ ] Run `pytest` before merging any change; CI must remain green.
+- [ ] Update `env.yaml` + `README.md` whenever env vars or architecture change.
+- [ ] Keep Slack App manifests (dev + prod) up to date with current URLs.
+
+## Reference documents
+
+- [`IMPLEMENTATION_SUMMARY.md`](./IMPLEMENTATION_SUMMARY.md) – Deep dive into pipelines, gating, and Slack commands.
+- [`PROJECT_DOCUMENT.md`](./PROJECT_DOCUMENT.md) – Comprehensive project guide for developers, testers, architects, and stakeholders (created alongside this README).
+
+For questions, check the Slack `#recruitment-automation` channel or reach out to the on-call engineer listed in the runbook.

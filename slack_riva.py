@@ -1,193 +1,148 @@
 
-"""
-Slack router for Riva (L1 AI recruiter).
-Handles both direct messages and channel mentions.
-"""
+"""FastAPI router for secure Riva Slack commands and events."""
 
-import os
+from __future__ import annotations
+
+import asyncio
+import json
 import logging
-from typing import Optional
+import os
+from typing import Any, Dict
+from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from slack_bots import RivaSlackBot, WORKING_PLACEHOLDER_TEXT
-from slack_service import SlackClient
+from slack_bots import WORKING_PLACEHOLDER_TEXT
+from slack_riva_handlers import handle_riva_event, riva_bot, riva_slack_client
+from slack_security import verify_slack_request
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-BOT_USER_ID_RIVA = os.getenv("BOT_USER_ID_RIVA", "").strip() or os.getenv("SLACK_RIVA_BOT_USER_ID", "").strip()
-
-# Initialize Riva bot and client
-riva_slack_client = SlackClient(
-    name="riva",
-    bot_token=os.getenv("SLACK_RIVA_BOT_TOKEN"),
-    default_channel=os.getenv("SLACK_RIVA_DEFAULT_CHANNEL_ID"),
-    signing_secret=os.getenv("SLACK_RIVA_SIGNING_SECRET"),
+BOT_USER_ID_RIVA = (
+    os.getenv("BOT_USER_ID_RIVA", "").strip()
+    or os.getenv("SLACK_RIVA_BOT_USER_ID", "").strip()
 )
-
-riva_bot = RivaSlackBot(slack_client=riva_slack_client)
-
-
-async def handle_riva_summary(routing_text: str) -> str:
-    return riva_bot.handle_command(routing_text)
+SLACK_RIVA_SIGNING_SECRET = os.getenv("SLACK_RIVA_SIGNING_SECRET")
 
 
-async def handle_riva_hires(routing_text: str) -> str:
-    return riva_bot.handle_command(routing_text)
+@router.post("/slack-riva/events")
+async def slack_riva_events(request: Request) -> JSONResponse:
+    """Slack Event Subscriptions endpoint for the Riva bot."""
+    body = await request.body()
+    verify_slack_request(request, body, SLACK_RIVA_SIGNING_SECRET)
 
-
-async def handle_riva_last_run_summary(routing_text: str) -> str:
-    return riva_bot.handle_command(routing_text)
-
-
-async def handle_riva_manual_review(routing_text: str, slack_user_id: Optional[str] = None) -> str:
-    logger.info(
-        "riva_manual_review_routed",
-        extra={"user_id": slack_user_id, "text_length": len(routing_text)},
-    )
-    return riva_bot.handle_command(routing_text)
-
-
-async def handle_riva_chat(
-    raw_user_text: str,
-    slack_user_id: Optional[str] = None,
-    channel_id: Optional[str] = None,
-) -> str:
-    logger.info(
-        "riva_chat_routed",
-        extra={"user_id": slack_user_id, "channel_id": channel_id, "text_length": len(raw_user_text)},
-    )
-    return riva_bot.handle_command(raw_user_text)
-
-
-def build_supported_commands_help_text_for_riva() -> str:
-    """Return help text for Riva commands."""
-    return (
-        "Supported commands:\n"
-        "• summary <Candidate> - <Role>\n"
-        "• ready-for-l2 <Role>\n"
-        "• last-run-summary\n"
-        "• review <Candidate> - <Role> (trigger manual L1 review)\n"
-        "\nOr just ask me anything in natural language!"
-    )
-
-
-@router.post("/slack/riva")
-async def slack_riva_events(request: Request):
-    """
-    Unified Slack event handler for Riva.
-    Supports both DMs and channel mentions.
-    """
     try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
+        payload: Dict[str, Any] = json.loads(body)
+    except json.JSONDecodeError as exc:
+        logger.error("riva_event_invalid_json", extra={"error": str(exc)})
+        raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
 
     if payload.get("type") == "url_verification":
-        challenge = payload.get("challenge")
-        return JSONResponse({"challenge": challenge})
+        logger.info("riva_event_challenge")
+        return JSONResponse({"challenge": payload.get("challenge")})
 
-    print("🔥 RIVA HANDLER REACHED")
-    print(payload)
-
-    event = payload.get("event", {}) or {}
     headers = request.headers
+    if headers.get("X-Slack-Retry-Num"):
+        logger.info(
+            "riva_event_retry_dropped",
+            extra={
+                "retry_num": headers.get("X-Slack-Retry-Num"),
+                "reason": headers.get("X-Slack-Retry-Reason"),
+            },
+        )
+        return JSONResponse({"ok": True})
 
-    if "X-Slack-Retry-Num" in headers:
-        print("⚠️ Slack retry ignored")
-        return {"ok": True}
-
+    event = payload.get("event") or {}
     if event.get("bot_id"):
-        print("⚠️ Ignored: Slack bot message")
-        return {"ok": True}
+        logger.debug("riva_event_ignored_bot", extra={"bot_id": event.get("bot_id")})
+        return JSONResponse({"ok": True})
 
     user = event.get("user")
     if user and BOT_USER_ID_RIVA and user == BOT_USER_ID_RIVA:
-        print("⚠️ Ignored: message from bot user")
-        return {"ok": True}
+        logger.debug("riva_event_self_message", extra={"user": user})
+        return JSONResponse({"ok": True})
 
-    channel = event.get("channel", "") or ""
-    text = event.get("text", "") or ""
-    thread_ts = event.get("thread_ts") or event.get("ts")
+    logger.info(
+        "riva_event_received",
+        extra={
+            "event_type": event.get("type"),
+            "channel": event.get("channel"),
+            "user": user,
+        },
+    )
 
-    print("CHANNEL:", channel)
-    print("TEXT:", text)
-    print("USER:", user)
+    asyncio.create_task(_dispatch_riva_event(event))
+    return JSONResponse({"ok": True})
 
-    if not channel or not text:
-        print("⚠️ Missing channel or text; returning early")
-        return {"ok": True}
 
-    is_dm = channel.startswith("D")
+@router.post("/slack/riva")
+async def slack_riva_command(request: Request) -> JSONResponse:
+    """Slash command entry-point for /riva and related helpers."""
+    body = await request.body()
+    verify_slack_request(request, body, SLACK_RIVA_SIGNING_SECRET)
 
-    if is_dm:
-        cleaned_text = text.strip()
-        print("💬 DM MODE:", cleaned_text)
-    else:
-        if not BOT_USER_ID_RIVA:
-            print("⚠️ BOT_USER_ID_RIVA not configured; returning")
-            return {"ok": True}
+    form = _parse_slack_form(body)
+    command = form.get("command")
+    text = form.get("text", "")
+    channel_id = form.get("channel_id")
+    user_id = form.get("user_id")
 
-        mention = f"<@{BOT_USER_ID_RIVA}>"
-        if mention not in text:
-            print("⚠️ Ignored: no mention in channel")
-            return {"ok": True}
+    if not command or not channel_id or not user_id:
+        raise HTTPException(status_code=400, detail="Missing Slack command fields")
 
-        cleaned_text = text.replace(mention, "").strip()
-        print("📢 CHANNEL MODE:", cleaned_text)
+    logger.info(
+        "riva_command_received",
+        extra={"command": command, "channel_id": channel_id, "user_id": user_id},
+    )
 
-    if not cleaned_text:
-        print("⚠️ Nothing to route after cleaning; returning")
-        return {"ok": True}
+    response = await _route_slash_command(command, text, channel_id)
+    return JSONResponse(response)
 
-    routing_text = cleaned_text
-    lowercase = routing_text.lower()
 
-    if channel:
-        riva_slack_client.post_message_get_ts(
-            WORKING_PLACEHOLDER_TEXT,
-            channel=channel,
-            thread_ts=thread_ts,
-        )
-
+def _parse_slack_form(body: bytes) -> Dict[str, str]:
     try:
-        if lowercase.startswith("summary"):
-            reply = await handle_riva_summary(routing_text)
-        elif lowercase.startswith("hires"):
-            reply = await handle_riva_hires(routing_text)
-        elif lowercase.startswith("last-run-summary"):
-            reply = await handle_riva_last_run_summary(routing_text)
-        elif lowercase.startswith("review "):
-            reply = await handle_riva_manual_review(routing_text, user)
-        elif lowercase in ("help", "commands"):
-            reply = build_supported_commands_help_text_for_riva()
-        else:
-            print("🤖 ENTERING RIVA CHAT MODE")
-            reply = await handle_riva_chat(
-                raw_user_text=routing_text,
-                slack_user_id=user,
-                channel_id=channel,
+        decoded = body.decode("utf-8")
+    except UnicodeDecodeError as exc:  # pragma: no cover - invalid payloads
+        raise HTTPException(status_code=400, detail="Invalid Slack payload encoding") from exc
+
+    parsed = parse_qs(decoded, keep_blank_values=True)
+    return {key: values[0] for key, values in parsed.items() if values}
+
+
+async def _route_slash_command(command: str, text: str, channel_id: str) -> Dict[str, str]:
+    normalized_command = command.strip().lower()
+
+    if normalized_command in {"/riva", "/riva-test"}:
+        asyncio.create_task(_execute_riva_command(text, channel_id))
+        return {"response_type": "ephemeral", "text": WORKING_PLACEHOLDER_TEXT}
+
+    if normalized_command == "/riva-help":
+        help_text = await asyncio.to_thread(riva_bot.handle_command, "help", None)
+        return {"response_type": "ephemeral", "text": help_text}
+
+    logger.warning("riva_command_unknown", extra={"command": command})
+    raise HTTPException(status_code=400, detail="Unknown Slack command")
+
+
+async def _execute_riva_command(text: str, channel_id: str) -> None:
+    try:
+        await asyncio.to_thread(riva_bot.handle_command, text, channel_id)
+    except Exception:  # pragma: no cover - defensive logging
+        logger.exception("riva_command_execution_failed")
+        if riva_slack_client:
+            riva_slack_client.post_message(
+                "⚠️ I hit an error while processing that request. Please try again shortly.",
+                channel=channel_id,
             )
 
-        if not reply:
-            print("⚠️ No reply generated; returning ok")
-            return {"ok": True}
 
-        riva_slack_client.post_message(
-            reply,
-            channel=channel,
-            thread_ts=thread_ts,
+async def _dispatch_riva_event(event: Dict[str, Any]) -> None:
+    try:
+        await handle_riva_event(event)
+    except Exception:  # pragma: no cover - defensive logging
+        logger.exception(
+            "riva_event_handler_failed",
+            extra={"event_type": event.get("type"), "channel": event.get("channel")},
         )
-        print("📨 Riva reply sent as new threaded message!")
-    except Exception as exc:
-        logger.error("Error in Riva handler", exc_info=True, extra={"error": str(exc)})
-        print(f"❌ Error: {exc}")
-        fallback = (
-            "I encountered an error. Here are the commands I support:\n"
-            + build_supported_commands_help_text_for_riva()
-        )
-        riva_slack_client.post_message(fallback, channel=channel, thread_ts=thread_ts)
-
-    return {"ok": True}
