@@ -31,6 +31,12 @@ def _sign_headers(secret: str, body: str) -> dict:
 def test_arjun_url_verification(monkeypatch, test_client):
     secret = "arjun-secret"
     monkeypatch.setattr(slack_arjun, "SLACK_ARJUN_SIGNING_SECRET", secret)
+    verify_called = {"count": 0}
+
+    def fake_verify(*_args, **_kwargs):
+        verify_called["count"] += 1
+
+    monkeypatch.setattr(slack_arjun, "verify_slack_request", fake_verify)
     body = json.dumps({"type": "url_verification", "challenge": "test-challenge"})
     headers = _sign_headers(secret, body)
 
@@ -38,12 +44,19 @@ def test_arjun_url_verification(monkeypatch, test_client):
 
     assert response.status_code == 200
     assert response.json()["challenge"] == "test-challenge"
+    assert verify_called["count"] == 0
 
 
 def test_arjun_event_callback_dispatch(monkeypatch, test_client):
     secret = "arjun-secret"
     monkeypatch.setattr(slack_arjun, "SLACK_ARJUN_SIGNING_SECRET", secret)
     monkeypatch.setattr(slack_arjun, "BOT_USER_ID_ARJUN", "UARJUN")
+    verify_called = {"count": 0}
+
+    def fake_verify(*_args, **_kwargs):
+        verify_called["count"] += 1
+
+    monkeypatch.setattr(slack_arjun, "verify_slack_request", fake_verify)
 
     captured_event = {}
 
@@ -80,6 +93,7 @@ def test_arjun_event_callback_dispatch(monkeypatch, test_client):
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
+    assert verify_called["count"] == 1
 
     assert "coro" in created_task
     asyncio.run(created_task["coro"])

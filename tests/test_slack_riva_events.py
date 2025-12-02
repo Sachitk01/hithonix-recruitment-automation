@@ -31,6 +31,12 @@ def _sign_headers(secret: str, body: str) -> dict:
 def test_riva_url_verification(monkeypatch, test_client):
     secret = "riva-secret"
     monkeypatch.setattr(slack_riva, "SLACK_RIVA_SIGNING_SECRET", secret)
+    verify_called = {"count": 0}
+
+    def fake_verify(*_args, **_kwargs):
+        verify_called["count"] += 1
+
+    monkeypatch.setattr(slack_riva, "verify_slack_request", fake_verify)
     body = json.dumps({"type": "url_verification", "challenge": "test-challenge"})
     headers = _sign_headers(secret, body)
 
@@ -38,12 +44,19 @@ def test_riva_url_verification(monkeypatch, test_client):
 
     assert response.status_code == 200
     assert response.json()["challenge"] == "test-challenge"
+    assert verify_called["count"] == 0
 
 
 def test_riva_event_callback_dispatch(monkeypatch, test_client):
     secret = "riva-secret"
     monkeypatch.setattr(slack_riva, "SLACK_RIVA_SIGNING_SECRET", secret)
     monkeypatch.setattr(slack_riva, "BOT_USER_ID_RIVA", "URIVA")
+    verify_called = {"count": 0}
+
+    def fake_verify(*_args, **_kwargs):
+        verify_called["count"] += 1
+
+    monkeypatch.setattr(slack_riva, "verify_slack_request", fake_verify)
 
     captured_event = {}
 
@@ -80,6 +93,7 @@ def test_riva_event_callback_dispatch(monkeypatch, test_client):
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
+    assert verify_called["count"] == 1
 
     # Run the captured coroutine to completion to assert dispatch behavior
     assert "coro" in created_task

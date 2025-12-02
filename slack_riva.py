@@ -31,17 +31,20 @@ SLACK_RIVA_SIGNING_SECRET = os.getenv("SLACK_RIVA_SIGNING_SECRET")
 async def slack_riva_events(request: Request) -> JSONResponse:
     """Slack Event Subscriptions endpoint for the Riva bot."""
     body = await request.body()
-    verify_slack_request(request, body, SLACK_RIVA_SIGNING_SECRET)
-
     try:
         payload: Dict[str, Any] = json.loads(body)
     except json.JSONDecodeError as exc:
         logger.error("riva_event_invalid_json", extra={"error": str(exc)})
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
 
-    if payload.get("type") == "url_verification":
-        logger.info("riva_event_challenge")
+    payload_type = payload.get("type")
+
+    if payload_type == "url_verification":
+        logger.info("riva_event_url_verification_received")
+        logger.info("riva_event_url_verification_signature_skipped")
         return JSONResponse({"challenge": payload.get("challenge")})
+
+    verify_slack_request(request, body, SLACK_RIVA_SIGNING_SECRET)
 
     headers = request.headers
     if headers.get("X-Slack-Retry-Num"):
@@ -64,14 +67,15 @@ async def slack_riva_events(request: Request) -> JSONResponse:
         logger.debug("riva_event_self_message", extra={"user": user})
         return JSONResponse({"ok": True})
 
-    logger.info(
-        "riva_event_received",
-        extra={
-            "event_type": event.get("type"),
-            "channel": event.get("channel"),
-            "user": user,
-        },
-    )
+    if payload_type == "event_callback":
+        logger.info(
+            "riva_event_callback_received",
+            extra={
+                "event_type": event.get("type"),
+                "channel": event.get("channel"),
+                "user": user,
+            },
+        )
 
     asyncio.create_task(_dispatch_riva_event(event))
     return JSONResponse({"ok": True})
