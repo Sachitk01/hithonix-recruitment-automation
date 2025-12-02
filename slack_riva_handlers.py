@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import partial
 from typing import Any, Dict, Optional
 
 from anyio import to_thread
@@ -104,9 +105,11 @@ async def _send_ack(channel: Optional[str], user: Optional[str]) -> None:
         return
     try:
         await to_thread.run_sync(
-            _riva_web_client.chat_postMessage,
-            channel=channel,
-            text="Got it, I'm on it. I'll reply here once I've processed your request.",
+            partial(
+                _riva_web_client.chat_postMessage,
+                channel=channel,
+                text="Got it, I'm on it. I'll reply here once I've processed your request.",
+            )
         )
     except SlackApiError as exc:  # pragma: no cover - network errors
         logger.error(
