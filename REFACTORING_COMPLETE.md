@@ -119,7 +119,7 @@ def get_candidate_folders_for_role(
 ```python
 assert summary.processed == 11  # Only folders, not 13
 assert summary.moved_to_l2 == 11
-assert summary.errors == 0
+assert len(summary.errors) == 0
 assert mock_riva_file_resolver.load.call_count == 11  # Processes 11, not 13
 ```
 

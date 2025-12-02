@@ -71,6 +71,18 @@ COMMAND_PREFIXES = (
 )
 
 
+def _error_count(summary: Optional[object]) -> int:
+    if not summary:
+        return 0
+    errors = getattr(summary, "errors", 0)
+    if isinstance(errors, (list, tuple, set)):
+        return len(errors)
+    try:
+        return int(errors or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class ArjunChatHandler:
     """Handles conversational chat mode for Arjun using an LLM."""
 
@@ -158,6 +170,7 @@ class ArjunChatHandler:
         try:
             summary = SummaryStore.get_l2_summary()
             if summary:
+                error_total = _error_count(summary)
                 context_parts.append(
                     "Last L2 Batch Run:\n"
                     f"- Candidates seen: {summary.total_seen}\n"
@@ -165,7 +178,7 @@ class ArjunChatHandler:
                     f"- Hires: {summary.hires}\n"
                     f"- Rejects: {summary.rejects}\n"
                     f"- Holds: {summary.hold_decisions}\n"
-                    f"- Errors: {summary.errors}"
+                    f"- Errors: {error_total}"
                 )
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.warning("Failed to load L2 summary: %s", exc)

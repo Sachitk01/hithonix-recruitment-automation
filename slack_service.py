@@ -9,6 +9,16 @@ from slack_blocks import build_batch_summary_blocks
 slack_logger = logging.getLogger("slack")
 
 
+def _error_count(summary: Any) -> int:
+    errors = getattr(summary, "errors", 0)
+    if isinstance(errors, (list, tuple, set)):
+        return len(errors)
+    try:
+        return int(errors or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class SlackClient:
     def __init__(
         self,
@@ -185,9 +195,10 @@ class SlackNotifier:
         blocks = build_batch_summary_blocks(summary, "L1")
         
         # Fallback text for notification preview
+        error_total = _error_count(summary)
         fallback_text = (
             f"Riva L1 Batch Complete: {summary.evaluated} evaluated, "
-            f"{summary.moved_to_l2} moved to L2, {summary.errors} errors"
+            f"{summary.moved_to_l2} moved to L2, {error_total} errors"
         )
         
         if not self.riva_client:
@@ -204,9 +215,10 @@ class SlackNotifier:
         blocks = build_batch_summary_blocks(summary, "L2")
         
         # Fallback text for notification preview
+        error_total = _error_count(summary)
         fallback_text = (
             f"Arjun L2 Batch Complete: {summary.evaluated} evaluated, "
-            f"{summary.hires} advanced to final, {summary.errors} errors"
+            f"{summary.hires} advanced to final, {error_total} errors"
         )
         
         if not self.arjun_client:

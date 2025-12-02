@@ -72,6 +72,18 @@ COMMAND_PREFIXES = (
 )
 
 
+def _error_count(summary: Optional[object]) -> int:
+    if not summary:
+        return 0
+    errors = getattr(summary, "errors", 0)
+    if isinstance(errors, (list, tuple, set)):
+        return len(errors)
+    try:
+        return int(errors or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class RivaChatHandler:
     """Handles conversational chat mode for Riva using LLM."""
     
@@ -420,6 +432,7 @@ class RivaChatHandler:
         try:
             summary = SummaryStore.get_l1_summary()
             if summary:
+                error_total = _error_count(summary)
                 context_parts.append(
                     f"Last L1 Batch Run:\n"
                     f"- Total Seen: {summary.total_seen}\n"
@@ -427,7 +440,7 @@ class RivaChatHandler:
                     f"- Moved to L2: {summary.moved_to_l2}\n"
                     f"- Rejected: {summary.rejected_at_l1}\n"
                     f"- On Hold: {summary.hold_decisions}\n"
-                    f"- Errors: {summary.errors}"
+                    f"- Errors: {error_total}"
                 )
                 
                 # Add candidate details if available

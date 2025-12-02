@@ -7,6 +7,23 @@ Provides composable functions to build rich, interactive Slack messages.
 from typing import Any, Dict, List, Optional
 
 MAX_CANDIDATES_PER_GROUP = 15
+RISK_FLAG_DISPLAY_LIMIT = 3
+
+
+def _normalize_error_count(errors_value: Any) -> int:
+    if isinstance(errors_value, (list, tuple, set)):
+        return len(errors_value)
+    try:
+        return int(errors_value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_error_entries(batch_summary: Any) -> List[Any]:
+    errors = getattr(batch_summary, "errors", None)
+    if isinstance(errors, list):
+        return errors
+    return []
 
 
 def build_batch_summary_blocks(batch_summary: Any, stage: str) -> List[Dict[str, Any]]:
@@ -30,8 +47,15 @@ def build_batch_summary_blocks(batch_summary: Any, stage: str) -> List[Dict[str,
     
     # Summary stats
     blocks.extend(build_summary_stats(batch_summary, stage))
-    
-    # Divider
+
+    # Optional error section for L1 batches
+    if stage == "L1":
+        error_blocks = build_error_details(batch_summary)
+        if error_blocks:
+            blocks.append({"type": "divider"})
+            blocks.extend(error_blocks)
+
+    # Divider before candidate details
     blocks.append({"type": "divider"})
     
     # Candidate groups by outcome
@@ -69,7 +93,7 @@ def build_status_header(batch_summary: Any, stage: str) -> List[Dict[str, Any]]:
 def build_summary_stats(batch_summary: Any, stage: str) -> List[Dict[str, Any]]:
     """Build summary statistics section with fields."""
     evaluated = getattr(batch_summary, "evaluated", 0)
-    errors = getattr(batch_summary, "errors", 0)
+    error_count = _normalize_error_count(getattr(batch_summary, "errors", 0))
     
     fields = [
         {"type": "mrkdwn", "text": f"*Evaluated:*\n{evaluated}"}
@@ -102,12 +126,45 @@ def build_summary_stats(batch_summary: Any, stage: str) -> List[Dict[str, Any]]:
         if hold_data > 0:
             fields.append({"type": "mrkdwn", "text": f"*Hold (Data Incomplete):*\n{hold_data}"})
     
-    if errors > 0:
-        fields.append({"type": "mrkdwn", "text": f"*Errors:*\n{errors}"})
+    if error_count > 0:
+        fields.append({"type": "mrkdwn", "text": f"*Errors:*\n{error_count}"})
     
     return [{
         "type": "section",
         "fields": fields
+    }]
+
+
+def build_error_details(batch_summary: Any, limit: int = 3) -> List[Dict[str, Any]]:
+    """Render a concise list of batch errors for Slack."""
+    entries = _extract_error_entries(batch_summary)
+    if not entries:
+        return []
+
+    lines: List[str] = ["*Errors detected (top 3)*"]
+    for error in entries[:limit]:
+        candidate = getattr(error, "candidate_name", None) or "Unknown candidate"
+        role = getattr(error, "role", None) or "Unknown role"
+        folder_id = getattr(error, "folder_id", None)
+        folder_link = f"https://drive.google.com/drive/folders/{folder_id}" if folder_id else None
+
+        bullet = f"• *{candidate}* — {role}"
+        if folder_link:
+            bullet += f" (<{folder_link}|folder>)"
+        lines.append(bullet)
+
+        code = getattr(error, "error_code", "error")
+        message = getattr(error, "error_message", "See logs for full detail.")
+        lines.append(f"   *Error:* `{code}`")
+        lines.append(f"   {message}")
+
+    remaining = len(entries) - limit
+    if remaining > 0:
+        lines.append(f"…and {remaining} more errors. See detailed report.")
+
+    return [{
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "\n".join(lines)}
     }]
 
 
@@ -240,6 +297,10 @@ def build_candidate_row(candidate: Any, outcome: str) -> List[Dict[str, Any]]:
                     "text": f"_Reason: {reason_text}_"
                 }]
             })
+
+    risk_block = _build_risk_flag_block(candidate, outcome)
+    if risk_block:
+        blocks.append(risk_block)
     
     return blocks
 
@@ -272,3 +333,52 @@ def _format_hold_reason(reason: Optional[str], hold_reason: Optional[str]) -> Op
         return f"{base} ({reason})"
     
     return reason or base
+
+
+def _build_risk_flag_block(candidate: Any, outcome: str) -> Optional[Dict[str, Any]]:
+    if not _should_render_risk_flags(candidate, outcome):
+        return None
+
+    risk_flags = _extract_risk_flags(candidate)
+    formatted = _format_risk_flags(risk_flags)
+    if not formatted:
+        return None
+
+    return {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": formatted}],
+    }
+
+
+def _should_render_risk_flags(candidate: Any, outcome: str) -> bool:
+    outcome = (outcome or "").lower()
+    if outcome == "reject":
+        return True
+    if outcome != "hold":
+        return False
+
+    hold_reason = (getattr(candidate, "hold_reason", None) or "").lower()
+    return hold_reason in {"manual_review_required", "missing_noncritical_info"}
+
+
+def _format_risk_flags(risk_flags: Optional[List[str]], limit: int = RISK_FLAG_DISPLAY_LIMIT) -> Optional[str]:
+    if not risk_flags:
+        return None
+
+    cleaned = [flag.strip() for flag in risk_flags if flag and flag.strip()]
+    if not cleaned:
+        return None
+
+    display_flags = cleaned[:limit]
+    display_text = ", ".join(display_flags)
+    if len(cleaned) > limit:
+        display_text += ", …"
+
+    return f"Reasons: {display_text}"
+
+
+def _extract_risk_flags(candidate: Any) -> List[str]:
+    raw = getattr(candidate, "risk_flags", None)
+    if isinstance(raw, (list, tuple, set)):
+        return [flag for flag in raw if isinstance(flag, str)]
+    return []

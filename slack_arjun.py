@@ -13,6 +13,7 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from decision_engine import decide_intent
 from slack_bots import WORKING_PLACEHOLDER_TEXT
 from slack_arjun_handlers import handle_arjun_event, arjun_bot, arjun_slack_client
 from slack_security import verify_slack_request
@@ -132,7 +133,8 @@ async def _route_slash_command(command: str, text: str, channel_id: str) -> Dict
 
 async def _execute_arjun_command(text: str, channel_id: str) -> None:
     try:
-        await asyncio.to_thread(arjun_bot.handle_command, text, channel_id)
+        decision = decide_intent(text, bot="ARJUN")
+        await asyncio.to_thread(arjun_bot.handle_command, text, channel_id, decision.intent)
     except Exception:  # pragma: no cover - defensive logging
         logger.exception("arjun_command_execution_failed")
         if arjun_slack_client:

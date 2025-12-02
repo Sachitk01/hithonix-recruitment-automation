@@ -67,7 +67,8 @@ def convert_riva_result(
     recommendation = map_l1_pipeline_decision(pipeline_decision)
     normalized_score = _normalize_score(result.fit_score)
     confidence = _normalize_confidence(result.fit_score)
-    risk_flags = list(dict.fromkeys((result.red_flags or []) + (result.concerns or [])))
+    source_flags = (result.risk_flags or []) + (result.red_flags or []) + (result.concerns or [])
+    risk_flags = list(dict.fromkeys(source_flags))
     return L1Evaluation(
         candidate_id=candidate_id,
         role=role,

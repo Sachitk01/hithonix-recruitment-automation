@@ -174,6 +174,7 @@ class ArjunL2BatchProcessor:
                             hold_type=self.HOLD_TYPE_SKIPPED_NO_L2,
                             hold_reason=self.HOLD_REASON_CODE_MISSING_INFO,
                             candidate_folder_id=folder_id,
+                            risk_flags=["missing_l2_artifacts"],
                         )
                         continue
 
@@ -292,6 +293,7 @@ class ArjunL2BatchProcessor:
                         hold_reason=hold_reason_code,
                         candidate_folder_id=folder_id,
                         feedback_link=evaluation.feedback_link or evaluation.report_link,
+                        risk_flags=result.risk_flags,
                     )
                     self._record_final_decision_if_applicable(
                         candidate_name=folder_name,
@@ -640,6 +642,7 @@ class ArjunL2BatchProcessor:
                 hold_type=self.HOLD_TYPE_MISSING_L2_TRANSCRIPT,
                 hold_reason=self.HOLD_REASON_CODE_MISSING_INFO,
                 candidate_folder_id=folder_id,
+                risk_flags=["missing_l2_transcript"],
             )
             self._write_status_file(
                 folder_id,
@@ -685,6 +688,7 @@ class ArjunL2BatchProcessor:
             hold_type=self.HOLD_TYPE_DATA_INCOMPLETE,
             hold_reason=self.HOLD_REASON_CODE_MISSING_INFO,
             candidate_folder_id=folder_id,
+            risk_flags=["data_incomplete"],
         )
         self._write_status_file(
             folder_id,
@@ -1112,6 +1116,7 @@ class ArjunL2BatchProcessor:
         hold_reason: Optional[str] = None,
         candidate_folder_id: str,
         feedback_link: Optional[str] = None,
+        risk_flags: Optional[List[str]] = None,
     ) -> None:
         normalized = (decision or "").lower()
         if normalized in {"shortlisted", "hire", "shortlist"}:
@@ -1121,6 +1126,7 @@ class ArjunL2BatchProcessor:
         elif normalized not in {self.DECISION_SHORTLIST, self.DECISION_REJECT, self.DECISION_HOLD}:
             normalized = self.DECISION_HOLD
 
+        cleaned_risk_flags = [flag.strip() for flag in (risk_flags or []) if isinstance(flag, str) and flag.strip()]
         self.summary.candidates.append(
             L2CandidateResult(
                 candidate_name=candidate_name,
@@ -1132,6 +1138,7 @@ class ArjunL2BatchProcessor:
                 folder_link=self._candidate_folder_link(candidate_folder_id),
                 feedback_link=feedback_link,
                 dashboard_link=self._build_dashboard_link(),
+                risk_flags=cleaned_risk_flags,
             )
         )
 

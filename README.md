@@ -163,12 +163,177 @@ Update `env.yaml` to reference secrets via `valueFrom.secretKeyRef` (already con
 
 See [`IMPLEMENTATION_SUMMARY.md`](./IMPLEMENTATION_SUMMARY.md#slack-commands) for the full matrix of `summary`, `ready-for-l2`, `hires`, `last-run-summary`, etc.
 
-## Batch jobs & schedulers
+## Slack assistants & intent routing
 
-- `batch_jobs.py` exposes `run_riva_l1_batch` and `run_arjun_l2_batch`, which the HTTP endpoints `/run-l1-batch` and `/run-l2-batch` invoke.
+### Event lifecycle
+1. Slack hits `/slack-riva/events` or `/slack-arjun/events`. Routers (`slack_riva.py`, `slack_arjun.py`) parse JSON, handle `url_verification`, validate signatures (`verify_slack_request`), and drop retries via `X-Slack-Retry-Num` headers.
+2. Events flow into `handle_riva_event` / `handle_arjun_event`; bot echoes are ignored while DM vs `app_mention` events follow different flows.
+3. `decide_intent()` in `decision_engine.py` classifies messages via deterministic rules + optional LLM fallback, returning intents like `L1_EVAL_SINGLE`, `L2_EVAL_SINGLE`, `PIPELINE_STATUS`, `DEBUG`, etc.
+4. Actionable intents post an immediate ack (Slack Web API `chat_postMessage`) and then spawn background work via `anyio.to_thread.run_sync`, keeping responses under Slack’s 3-second limit.
+5. `RivaSlackBot` / `ArjunSlackBot` (`slack_bots.py`) perform Drive lookups, read `l1_result.json` / `l2_result.json`, trigger manual reviews, or hand off to conversational chat handlers. Exceptions send `PIPELINE_ERROR_TEXT` to the originating channel.
+
+### Commands, intents, fallbacks
+- Greeting/help/small-talk intents reply with curated copy (`RIVA_GREETING_MESSAGE`, `ARJUN_HELP_MESSAGE`).
+- Unknown/unsupported intents receive `RIVA_UNSURE_MESSAGE` / `ARJUN_UNSURE_MESSAGE`, nudging toward `summary <Candidate> - <Role>` syntax.
+- Pipeline intents:
+   - `L1_EVAL_SINGLE` / `L1_EVAL_BATCH_STATUS` → `RivaSlackBot.handle_command` for `summary`, `ready-for-l2`, `last-run-summary`, `review`, etc.
+   - `L2_EVAL_SINGLE` / `L2_COMPARE` → `ArjunSlackBot` including comparison-focused chat.
+   - `PIPELINE_STATUS` / `DEBUG` → operational stats from `SummaryStore` or debug payload lookup.
+- Manual review commands (`review <candidate> - <role>`) call `manual_review_triggers.py` to validate Drive folders and queue the next batch.
+- Long-running intents (detected via `looks_like_long_running_intent`) post `WORKING_PLACEHOLDER_TEXT` then update the same message with the final response.
+
+### Slash commands
+- `/riva`, `/riva-test`, `/arjun` reuse the same routers. Each verifies signatures, parses fields, and responds with an ephemeral “working” message while the job runs async.
+- `/riva-help` responds synchronously with the Markdown command list.
+- Unknown slash commands return HTTP 400 and log `*_command_unknown` for diagnostics.
+
+## HTTP endpoints & background surface
+
+| Endpoint | Method | Owner | Notes |
+| --- | --- | --- | --- |
+| `/health`, `/healthz` | GET | `main.py` | Lightweight probes; `/health` also confirms scheduler state. |
+| `/debug-port` | GET | `main.py` | Prints resolved `PORT`, release hash, and scheduler metadata (handy for Cloud Run debugging). |
+| `/run-l1-batch`, `/run-l2-batch` | POST | `main.py` ➜ `batch_jobs.py` | Launch Riva L1 / Arjun L2 processors, returning JSON summaries and posting Slack updates if configured. |
+| `/slack-riva/events`, `/slack-arjun/events` | POST | Slack routers | Event Subscription entry points with signature verification/retry handling. |
+| `/slack/riva`, `/slack/arjun` | POST | Slack routers | Slash commands that respond immediately while work continues in background. |
+| `/docs`, `/redoc` | GET | FastAPI | Auto-generated docs; useful locally. |
+
+Logging middleware tags each request with an `actor` (`slack`, `scheduler`, `manual`), injects correlation IDs, and trims payloads for privacy-safe observability.
+
+## Evaluation pipelines – deep dive
+
+### Riva L1 (`riva_l1/riva_l1_batch.py`)
+1. **Normalization** – `Normalizer.run()` scans all `L1_FOLDERS`, emitting `normalization_report.json`.
+2. **Gating** – `_apply_gating()` enforces transcript + resume/JD presence, immediately marking missing artifacts as `ON_HOLD_MISSING_L1_TRANSCRIPT` or `DATA_INCOMPLETE`.
+3. **File resolution** – `RivaFileResolver` assembles resume/JD/transcript/feedback text and metadata/links.
+4. **Memory context** – `_prepare_memory_context()` (if `MEMORY_ENABLED`) enriches prompts with prior candidate events and role profiles via `memory_service.py`.
+5. **Evaluation** – `RivaL1Service` (OpenAI) outputs fit scores, strengths, weaknesses, risk flags; raw payloads optionally upload to `debug_storage`.
+6. **Decision engine** – `decide_l1_outcome()` maps results to `SEND_TO_L2`, `REJECT_AT_L1`, or `HOLD_*`, applying creamy-layer caps and risk heuristics.
+7. **Persistence & routing** – `_persist_l1_result()` writes `l1_result.json`; `_write_status_file()` updates `l1_status.json`; `_route_candidate()` moves folders to L2 Pending Review or reject parents via `folder_resolver.py`.
+8. **Reporting** – `DecisionStore`, `SummaryStore`, recruiter dashboards (`sheet_service.py`), and `RivaOutputWriter` keep stakeholders informed.
+
+### Arjun L2 (`arjun_l2/arjun_l2_batch.py`)
+1. **Discovery/gating** – Iterates `L2_FOLDERS`, requires `normalization_report.json`, and detects transcripts via `find_l2_transcript_file` (missing artifacts ⇒ `ON_HOLD_MISSING_L2_TRANSCRIPT`/`DATA_INCOMPLETE_L2`).
+2. **Artifact extraction** – `DriveManager`, `pdf_reader.py`, `docx_reader.py`, and Google Doc export pull resume/JD/transcript text.
+3. **Memory context** – `_prepare_memory_context()` loads the last L1 event plus role profile for richer prompts.
+4. **Evaluation** – `ArjunL2Service` computes final score, leadership/technical commentary, risk flags, and rationale.
+5. **Decision logic** – `decide_l2_outcome()` collapses results into `ADVANCE_TO_FINAL`, `REJECT_AT_L2`, `HOLD_EXEC_REVIEW`, or `HOLD_DATA_INCOMPLETE`, feeding dashboards and the Final Decision Store.
+6. **Persistence & routing** – `_persist_l2_result()` writes `l2_result.json`; `_route_candidate()` moves folders to Final Selected / L2 Reject / hold; `_update_recruiter_dashboard_row()` syncs Sheets with confidence bands and next actions.
+7. **Memory logging** – Candidate/role events and audit logs append to the memory DB for longitudinal insights.
+
+## Data topology
+
+| System | Module(s) | Purpose |
+| --- | --- | --- |
+| Google Drive | `drive_service.py`, `folder_map.py`, `folder_resolver.py` | List candidate folders, download artifacts, write `l1_result.json` / `l2_result.json`, and move folders between Pending/Reject/Final parents. |
+| Google Sheets | `sheet_service.py`, `map_role_to_sheet_title`, `SheetManager` | Maintain recruiter dashboards and analytics logs. |
+| SummaryStore | `summary_store.py` | Cache latest L1/L2 batch summaries for Slack commands. |
+| DecisionStore | `decision_store.py` | Persist structured decision logs (scores, summaries, routing). |
+| Memory DB | `memory_service.py`, `memory_config.py` | SQLAlchemy-backed store (SQLite default, Postgres via `MEMORY_DB_URL`) for candidate/role context and audit events. |
+| Debug storage | `debug_storage.py` | Upload raw L1/L2 payloads for later inspection. |
+
+Update `folder_map.py` whenever recruiters add roles or restructure Drive parents.
+
+## Automation & scheduling
+
+- `batch_jobs.py` exposes `run_riva_l1_batch` / `run_arjun_l2_batch`, which `/run-l1-batch` and `/run-l2-batch` invoke.
 - APScheduler registers the same jobs when `ENABLE_JOB_SCHEDULER=true` (disabled in dev via `dev.sh`).
-- Cloud Scheduler jobs (13:00 & 21:00 for L1, 16:00 & 23:00 for L2 UTC) call the HTTP endpoints using a service account with `roles/run.invoker`.
+- Cloud Scheduler jobs (13:00 & 21:00 for L1, 16:00 & 23:00 for L2 UTC) call the HTTP endpoints with a service account that holds `roles/run.invoker`.
 - Provision schedulers via `cloud_scheduler_commands.sh` or Terraform (`terraform/cloud_scheduler.tf`).
+
+## Testing matrix
+
+| Test module | Focus |
+| --- | --- |
+| `tests/test_slack_riva_handlers.py`, `tests/test_slack_arjun_handlers.py` | Event routing, ack behavior, fallback messaging. |
+| `tests/test_slack_bots.py`, `tests/test_slack_blocks.py` | Command parsing and Slack block rendering. |
+| `tests/test_decision_engine.py`, `tests/test_l1_decision.py`, `tests/test_l2_decision.py` | Intent classifier + deterministic decision logic. |
+| `tests/test_arjun_l2_batch.py`, `tests/test_riva_l1_batch.py` | Batch orchestration, gating, summary accounting. |
+| `tests/test_normalizer.py`, `tests/test_evaluation_converters.py` | Artifact normalization and schema conversion. |
+| `tests/test_memory_service.py` | SQLAlchemy memory CRUD/hashing. |
+| `tests/test_batch_jobs.py` | Scheduler glue + Slack summary posting. |
+
+Run `./run_tests.sh all` or `pytest tests -v` before PRs; spot-run individual modules while iterating locally.
+
+## Troubleshooting playbook
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Slack says “I’m not sure.” | Intent classified as `UNKNOWN` (formatting/verbs missing). | Follow suggested phrasing or inspect `decision_engine` logs. |
+| Manual `review` can’t find candidate. | Role absent from `folder_map.py` or folder renamed. | Update the map / rename folder. |
+| `/run-*` returns 403 to Scheduler. | Scheduler SA lacks `roles/run.invoker`. | Add IAM binding via `gcloud run services add-iam-policy-binding ...`. |
+| Candidates stuck on hold. | Missing transcript/resume or failed normalization. | Check Drive for `normalization_report.json` + files. |
+| L2 skipped candidates. | `find_l2_transcript_file` couldn’t detect transcript. | Ensure transcripts are PDF/DOCX/Google Docs referenced in normalization report. |
+| Slash command returns 400. | Command unrecognized or missing `command`/`channel_id`/`user_id`. | Verify Slack payload + configuration. |
+| Memory disabled at startup. | `get_memory_service()` failed (DB URL, permissions). | Fix `MEMORY_DB_URL` or fallback to SQLite. |
+| Secret access errors. | Runtime SA missing `roles/secretmanager.secretAccessor`. | Grant role and redeploy. |
+
+## Deployment & operations
+
+### Deploy scripts
+
+```bash
+./scripts/deploy_cloud_run.sh
+```
+
+Keeps the Cloud Run service name stable so Slack URLs never change.
+
+### Container build & deploy
+
+```bash
+export PROJECT_ID=hithonix-recruitment-ai
+export REGION=asia-south1
+./cloudrun_build_and_deploy.sh
+```
+
+Builds, pushes, and deploys the Docker image (same workflow as CI).
+
+### Declarative deploy
+
+```bash
+gcloud run services replace env.yaml --region=asia-south1
+```
+
+`cloudrun.yaml` + `env.yaml` capture the service spec.
+
+### GitHub Actions
+
+- `.github/workflows/deploy-cloudrun.yml` needs secrets `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_SA_EMAIL`, `GCP_WORKLOAD_IDENTITY_PROVIDER`.
+- Pushes to `main` automatically build, push, and deploy.
+
+### IAM & networking
+
+- **Public ingress**: grant `allUsers` the `roles/run.invoker` binding if Slack/OpenAI must call unauthenticated.
+- **Private ingress**: remove that binding and issue ID tokens via service accounts.
+- Runtime SA should keep only essential roles (Secret Manager Accessor, Logging Writer, Trace Writer). Scheduler SA only needs `run.invoker`.
+
+### Monitoring
+
+- `GET /health`, `/healthz` – readiness probes.
+- `GET /debug-port` – prints resolved `PORT` and metadata.
+- Logs include `actor`, request IDs, Slack metadata; filter via `logName="projects/<project>/logs/run.googleapis.com%2Frequests"`.
+
+### Operations checklist
+
+- Rotate OpenAI/Slack/service-account secrets regularly.
+- Confirm Cloud Scheduler jobs hit the current Cloud Run URL after deploys.
+- Keep Slack app manifests up to date when URLs change (ngrok, etc.).
+- Update `env.yaml`, `README.md`, `PROJECT_DOCUMENT.md` whenever env vars or architecture shift.
+
+## Change management
+
+- Update `README.md`, `PROJECT_DOCUMENT.md`, and `IMPLEMENTATION_SUMMARY.md` when new endpoints, flows, or infrastructure land.
+- Keep `folder_map.py`, `drive_structure.txt`, and onboarding docs synced with Drive reorganizations.
+- Run impacted pytest modules before merging; attach logs when CI is flaky.
+- Ship risky changes (intent engine, decision heuristics, Slack behavior) behind feature flags or via canary deploys.
+- Record major architecture shifts in `AUDIT_SUMMARY.md` for future audits.
+
+## Reference documents
+
+- [`IMPLEMENTATION_SUMMARY.md`](./IMPLEMENTATION_SUMMARY.md) – Pipelines, gating, Slack command matrices.
+- [`PROJECT_DOCUMENT.md`](./PROJECT_DOCUMENT.md) – Detailed handbook mirroring this README.
+
+For questions, ping `#recruitment-automation` or the on-call engineer listed in the runbook.
 
 ## Testing & quality
 
@@ -179,60 +344,3 @@ See [`IMPLEMENTATION_SUMMARY.md`](./IMPLEMENTATION_SUMMARY.md#slack-commands) fo
 ```
 
 Test suites cover Slack bots, decision engines, evaluation converters, memory service, and batch orchestration. Add new tests under `tests/` and keep them runnable via `pytest` with zero external dependencies (Drive/Slack calls are mocked).
-
-## Deployment & operations
-
-### Container build & deploy (scripted)
-
-```bash
-export PROJECT_ID=hithonix-recruitment-ai
-export REGION=asia-south1
-./cloudrun_build_and_deploy.sh
-```
-
-The script builds the Docker image, pushes to Artifact Registry, and deploys to Cloud Run using the same command sequence as GitHub Actions.
-
-### Declarative deploy
-
-`cloudrun.yaml` / `env.yaml` capture the service spec (image, CPU/memory, min/max instances, env vars). Deploy with:
-
-```bash
-gcloud run services replace env.yaml --region=asia-south1
-```
-
-### GitHub Actions
-
-- See `.github/workflows/deploy-cloudrun.yml` (create `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_SA_EMAIL`, `GCP_WORKLOAD_IDENTITY_PROVIDER` secrets).
-- On push to `main`, the workflow builds, pushes, and deploys automatically.
-
-### IAM & networking
-
-- **Public ingress**: allow unauthenticated invocations with `gcloud run services add-iam-policy-binding ... --member="allUsers"` if Slack/OpenAI must call directly.
-- **Private ingress**: remove that binding and issue ID tokens via service accounts for internal callers.
-- Keep the runtime service account minimal (Secret Manager Accessor, Cloud Logging Writer, Cloud Trace Writer, Cloud Run Invoker by Cloud Scheduler SA).
-
-## Monitoring & troubleshooting
-
-- **Health checks** – `GET /health` and `/healthz` for Cloud Run probes.
-- **Port debugging** – `GET /debug-port` returns the resolved `PORT` plus helpful metadata when diagnosing Cloud Run ingress.
-- **Logs** – Structured logs include `actor`, request IDs, and Slack-related metadata. Filter in Cloud Logging by `logName="projects/<project>/logs/run.googleapis.com%2Frequests"`.
-- **Common issues**
-  - *Slack URL verification fails* → ensure `/slack-riva/events` is reachable and service allows unauthenticated traffic.
-  - *403 from Cloud Run* → missing `roles/run.invoker` binding.
-  - *Secret access denied* → grant `roles/secretmanager.secretAccessor` to the Cloud Run runtime service account for each secret ID.
-
-## Handover checklist
-
-- [ ] Rotate OpenAI, Slack, and service-account secrets after onboarding a new maintainer.
-- [ ] Confirm Cloud Run IAM (public vs private) matches the Slack/OpenAI integration approach.
-- [ ] Verify Cloud Scheduler jobs exist and are hitting the correct URLs.
-- [ ] Run `pytest` before merging any change; CI must remain green.
-- [ ] Update `env.yaml` + `README.md` whenever env vars or architecture change.
-- [ ] Keep Slack App manifests (dev + prod) up to date with current URLs.
-
-## Reference documents
-
-- [`IMPLEMENTATION_SUMMARY.md`](./IMPLEMENTATION_SUMMARY.md) – Deep dive into pipelines, gating, and Slack commands.
-- [`PROJECT_DOCUMENT.md`](./PROJECT_DOCUMENT.md) – Comprehensive project guide for developers, testers, architects, and stakeholders (created alongside this README).
-
-For questions, check the Slack `#recruitment-automation` channel or reach out to the on-call engineer listed in the runbook.

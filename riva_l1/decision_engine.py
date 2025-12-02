@@ -1,6 +1,13 @@
 
 from typing import List, Dict, Any, Optional
 
+from riva_l1.decision_policy import (
+    DATA_INCOMPLETE_RISK_CODES,
+    HARD_BLOCK_FLAGS,
+    MOVE_TO_L2_MIN_SCORE,
+    REJECT_MAX_SCORE,
+)
+
 def decide_l1_outcome(evaluation: Dict[str, Any]) -> str:
     """
     Decides the L1 outcome based on the evaluation result.
@@ -61,20 +68,19 @@ def decide_l1_outcome(evaluation: Dict[str, Any]) -> str:
     # --- 2. Apply Decision Logic ---
     
     # 1. Data Incomplete Checks
-    if "data_incomplete" in combined_flags or "missing_non_critical_info" in combined_flags:
+    if any(code in combined_flags for code in DATA_INCOMPLETE_RISK_CODES):
         return "HOLD_DATA_INCOMPLETE"
         
     # 2. Hard Block Checks
-    hard_block_keywords = {"hard_block", "mandatory_criteria_failed"}
-    if any(k in combined_flags for k in hard_block_keywords):
+    if any(k in combined_flags for k in HARD_BLOCK_FLAGS):
         return "REJECT_AT_L1"
         
     # 3. Move to L2
-    if overall_score >= 0.7 and jd_alignment_score >= 0.7:
+    if overall_score >= MOVE_TO_L2_MIN_SCORE and jd_alignment_score >= MOVE_TO_L2_MIN_SCORE:
         return "MOVE_TO_L2"
         
     # 4. Reject at L1
-    if overall_score <= 0.4 or jd_alignment_score <= 0.4:
+    if overall_score <= REJECT_MAX_SCORE or jd_alignment_score <= REJECT_MAX_SCORE:
         return "REJECT_AT_L1"
         
     # 5. Default Hold

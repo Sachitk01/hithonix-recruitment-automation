@@ -24,6 +24,7 @@ class Intent(str, Enum):
     PIPELINE_STATUS = "PIPELINE_STATUS"
     DEBUG = "DEBUG"
     SMALL_TALK = "SMALL_TALK"
+    WORK_QUERY = "WORK_QUERY"
     UNKNOWN = "UNKNOWN"
 
 
@@ -85,6 +86,26 @@ def simple_rule_engine(text: Optional[str], bot: str) -> Optional[Decision]:
         if _matches_any(normalized, ("compare", "comparison", "versus", "vs ", "stack rank")):
             return Decision(Intent.L2_COMPARE, target_bot, 0.72, "rule:l2_compare")
 
+    work_query_keywords = (
+        "candidate",
+        "role",
+        "status",
+        "outcome",
+        "result",
+        "ready",
+        "review",
+        "batch",
+        "pipeline",
+        "summary",
+        "hire",
+        "decision",
+        "run l2",
+        "run l1",
+        "latest",
+    )
+    if _matches_any(normalized, work_query_keywords):
+        return Decision(Intent.WORK_QUERY, target_bot, 0.65, "rule:work_query")
+
     if _matches_any(normalized, ("thanks", "thank you", "great", "awesome")):
         return Decision(Intent.SMALL_TALK, target_bot, 0.6, "rule:smalltalk")
 
@@ -117,6 +138,7 @@ Valid intents:
 - PIPELINE_STATUS
 - DEBUG
 - SMALL_TALK
+- WORK_QUERY
 - UNKNOWN
 
 Respond ONLY as JSON with fields: intent, confidence (0-1), notes.

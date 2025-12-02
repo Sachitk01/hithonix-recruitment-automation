@@ -26,7 +26,7 @@ from memory_service import MemoryService, get_memory_service
 from debug_storage import get_debug_storage
 from normalizer import Normalizer
 from riva_file_resolver import RivaFileBundle, RivaFileResolver
-from riva_l1.riva_l1_models import L1BatchSummary, L1CandidateResult
+from riva_l1.riva_l1_models import L1BatchSummary, L1CandidateResult, L1BatchError
 from riva_l1.riva_l1_service import RivaL1Service
 from riva_l1.decision_engine import decide_l1_outcome
 from riva_output_writer import RivaOutputWriter
@@ -115,6 +115,11 @@ class RivaL1BatchProcessor:
                 self.memory_enabled = False
                 self.use_candidate_memory = False
                 self.use_role_memory = False
+                self._record_batch_error(
+                    error_code="memory_service_unavailable",
+                    error_message="Memory service unavailable; continuing without historical context.",
+                    technical_detail=str(exc),
+                )
         else:
             self.use_candidate_memory = False
             self.use_role_memory = False
@@ -202,6 +207,11 @@ class RivaL1BatchProcessor:
             print(f"❌ Normalization failed: {e}")
             traceback.print_exc()
             # non-blocking – we still attempt processing
+            self._record_batch_error(
+                error_code="normalization_failed",
+                error_message="Normalization phase failed before evaluation could start.",
+                technical_detail=str(e),
+            )
 
         # ---------------------------------------------------
         # STEP 2 — L1 PROCESSING LOOP
@@ -261,7 +271,13 @@ class RivaL1BatchProcessor:
                 )
                 print(f"❌ Failed to list candidate folders for role={role}: {e}")
                 traceback.print_exc()
-                self.summary.errors += 1
+                self._record_batch_error(
+                    error_code=self._derive_error_code(e, default="candidate_listing_failed"),
+                    error_message=f"Unable to list candidate folders for {role}.",
+                    role=role,
+                    folder_id=l1_folder_id,
+                    technical_detail=str(e),
+                )
                 continue
 
             for candidate in candidate_folders:
@@ -392,6 +408,7 @@ class RivaL1BatchProcessor:
                         candidate_folder_id=folder_id,
                         feedback_link=feedback_link,
                         dashboard_link=self._build_dashboard_link(role),
+                        risk_flags=evaluation.risk_flags or result.risk_flags,
                     )
 
                     logger.info(
@@ -523,7 +540,14 @@ class RivaL1BatchProcessor:
                     )
                     print(f"❌ Error processing {folder_name}: {str(e)}")
                     traceback.print_exc()
-                    self.summary.errors += 1
+                    self._record_batch_error(
+                        error_code=self._derive_error_code(e),
+                        error_message="Candidate processing failed; please review this folder manually.",
+                        candidate_name=folder_name,
+                        role=role,
+                        folder_id=folder_id,
+                        technical_detail=str(e),
+                    )
 
         # ---------------------------------------------------
         # STEP 3 — SUMMARY
@@ -549,7 +573,7 @@ class RivaL1BatchProcessor:
             f"Missing transcript holds: {self.summary.hold_missing_transcript}"
         )
         print(f"Data incomplete: {self.summary.data_incomplete}")
-        print(f"Errors: {self.summary.errors}\n")
+        print(f"Errors: {self.summary.error_count}\n")
 
         return self.summary
 
@@ -816,10 +840,12 @@ class RivaL1BatchProcessor:
     ) -> Dict[str, Any]:
         payload = {
             "overall_score": result.fit_score,
+            "fit_score": result.fit_score,
             "strengths": evaluation.strengths,
             "risks": evaluation.risk_flags,
             "recommendation": evaluation.recommendation,
             "pipeline_recommendation": pipeline_recommendation,
+            "final_decision": result.final_decision,
             "rationale": result.match_summary,
             "structured_evaluation": evaluation.model_dump(),
         }
@@ -1178,6 +1204,41 @@ class RivaL1BatchProcessor:
             return None
         return f"https://docs.google.com/spreadsheets/d/{self.recruiter_sheet_id}"
 
+    def _record_batch_error(
+        self,
+        *,
+        error_code: str,
+        error_message: str,
+        candidate_name: Optional[str] = None,
+        role: Optional[str] = None,
+        folder_id: Optional[str] = None,
+        technical_detail: Optional[str] = None,
+    ) -> None:
+        self.summary.errors.append(
+            L1BatchError(
+                candidate_name=candidate_name,
+                role=role,
+                folder_id=folder_id,
+                error_code=error_code,
+                error_message=error_message,
+                technical_detail=technical_detail,
+            )
+        )
+
+    def _derive_error_code(self, exc: Exception, default: str = "candidate_processing_failed") -> str:
+        if isinstance(exc, PermissionError):
+            return "drive_access_denied"
+        if isinstance(exc, FileNotFoundError):
+            return "missing_critical_doc"
+        name = exc.__class__.__name__.lower()
+        if "openai" in name:
+            return "llm_evaluation_failed"
+        if isinstance(exc, ValueError):
+            return "llm_response_invalid"
+        if isinstance(exc, ConnectionError):
+            return "network_issue"
+        return default
+
     def _record_candidate_result(
         self,
         *,
@@ -1190,6 +1251,7 @@ class RivaL1BatchProcessor:
         candidate_folder_id: str,
         feedback_link: Optional[str] = None,
         dashboard_link: Optional[str] = None,
+        risk_flags: Optional[List[str]] = None,
     ) -> None:
         normalized_decision = (decision or "").lower() or self.DECISION_HOLD
         folder_link = self._candidate_folder_link(candidate_folder_id)
@@ -1207,6 +1269,7 @@ class RivaL1BatchProcessor:
                 folder_link=folder_link,
                 feedback_link=feedback_link,
                 dashboard_link=dashboard_link,
+                risk_flags=list(risk_flags or []),
             )
         )
 

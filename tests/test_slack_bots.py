@@ -3,7 +3,7 @@ import json
 import pytest
 
 import slack_bots
-from riva_l1.riva_l1_models import L1BatchSummary
+from riva_l1.riva_l1_models import L1BatchError, L1BatchSummary
 from slack_bots import ArjunSlackBot, RivaSlackBot
 from summary_store import SummaryStore
 
@@ -66,7 +66,8 @@ def test_riva_summary_command_returns_formatted_response():
             "overall_score": 82,
             "strengths": ["Communication"],
             "risks": ["Experience gap"],
-            "recommendation": "SEND_TO_L2",
+            "pipeline_recommendation": "SEND_TO_L2",
+            "final_decision": "SEND_TO_L2",
         },
         {"status": "SEND_TO_L2"},
     )
@@ -74,9 +75,31 @@ def test_riva_summary_command_returns_formatted_response():
     bot = RivaSlackBot(drive_factory=lambda: drive)
     response = bot.handle_command("summary Jane Doe - IT Support")
 
-    assert "Candidate: Jane Doe" in response
-    assert "L1 Status: SEND_TO_L2" in response
-    assert "Next Step: Ready for L2" in response
+    assert "Jane Doe — IT Support" in response
+    assert "L1 Decision: Move to L2" in response
+    assert "Fit score: 82" in response
+    assert "Risk flags: Experience gap" in response
+    assert "Next step: Ready for L2" in response
+
+
+def test_riva_summary_omits_risk_line_when_not_present():
+    drive = _build_drive_for_candidate(
+        {
+            "overall_score": 70,
+            "strengths": ["Domain knowledge"],
+            "risks": [],
+            "pipeline_recommendation": "HOLD",
+            "final_decision": "HOLD",
+            "rationale": "Needs more clarity on roadmap",
+        },
+        {"status": "HOLD"},
+    )
+
+    bot = RivaSlackBot(drive_factory=lambda: drive)
+    response = bot.handle_command("summary Jane Doe - IT Support")
+
+    assert "L1 Decision: Hold (Manual Review)" in response
+    assert "Risk flags" not in response
 
 
 def test_riva_last_run_summary_reports_cached_values():
@@ -94,7 +117,7 @@ def test_riva_last_run_summary_reports_cached_values():
         hold_jd_mismatch=0,
         on_hold_missing_transcript=1,
         data_incomplete=1,
-        errors=0,
+        errors=[],
     )
     SummaryStore.set_l1_summary(summary)
 
@@ -104,6 +127,56 @@ def test_riva_last_run_summary_reports_cached_values():
     assert "Candidates seen: 5" in response
     assert "Sent to L2: 2" in response
     assert "Hold: 2 (manual-review: 2, backup: 0, missing transcript: 1" in response
+
+
+def test_riva_last_run_summary_includes_error_details():
+    summary = L1BatchSummary(
+        total_seen=3,
+        evaluated=1,
+        moved_to_l2=0,
+        rejected_at_l1=0,
+        hold_decisions=0,
+        needs_manual_review=0,
+        hold_missing_transcript=0,
+        hold_data_incomplete=0,
+        errors=[
+            L1BatchError(
+                candidate_name="Alice",
+                role="IT Support",
+                folder_id="folder123",
+                error_code="drive_access_denied",
+                error_message="Drive permissions revoked",
+            ),
+            L1BatchError(
+                candidate_name="Bob",
+                role="IT Support",
+                error_code="llm_evaluation_failed",
+                error_message="OpenAI timeout",
+            ),
+            L1BatchError(
+                candidate_name="Cara",
+                role="IT Support",
+                error_code="missing_critical_doc",
+                error_message="Transcript missing after upload",
+            ),
+            L1BatchError(
+                candidate_name="Dee",
+                role="IT Support",
+                error_code="network_issue",
+                error_message="Network outage",
+            ),
+        ],
+    )
+    SummaryStore.set_l1_summary(summary)
+
+    bot = RivaSlackBot(drive_factory=lambda: StubDrive({}, {}, {}))
+    response = bot.handle_command("last-run-summary")
+
+    assert "Errors:" in response
+    assert "Alice — IT Support" in response
+    assert "drive_access_denied" in response
+    assert "Bob" in response
+    assert "more errors" in response  # indicates truncation notice
 
 
 def test_arjun_summary_command_returns_formatted_response(monkeypatch):
@@ -132,9 +205,12 @@ def test_arjun_summary_command_returns_formatted_response(monkeypatch):
     bot = ArjunSlackBot(drive_factory=lambda: drive)
     response = bot.handle_command("summary Jane Doe - IT Support")
 
-    assert "Final Recommendation: HIRE" in response
+    assert "Jane Doe — IT Support" in response
+    assert "L2 Decision: Move to Final Selected" in response
+    assert "L2 Summary: Strong on infra." in response
     assert "L1 vs L2: IMPROVED" in response
-    assert "Next Step: Move to Final Selected" in response
+    assert "Risk flags: None" in response
+    assert "Next step: Move to Final Selected" in response
 
 
 def test_arjun_hires_command_lists_candidates():

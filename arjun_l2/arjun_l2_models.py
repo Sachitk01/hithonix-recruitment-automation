@@ -10,9 +10,9 @@ class ArjunL2Result(BaseModel):
     communication_depth: str
     culture_alignment: str
     career_potential: str
-    strengths: List[str]
-    concerns: List[str]
-    risk_flags: List[str]
+    strengths: List[str] = Field(default_factory=list)
+    concerns: List[str] = Field(default_factory=list)
+    risk_flags: List[str] = Field(default_factory=list)
     final_score: int
     final_recommendation: str
     l2_summary: str
@@ -29,6 +29,7 @@ class L2CandidateResult(BaseModel):
     folder_link: Optional[str] = None
     feedback_link: Optional[str] = None
     dashboard_link: Optional[str] = None
+    risk_flags: List[str] = Field(default_factory=list)
 
 
 class L2BatchSummary(BaseModel):

@@ -120,6 +120,7 @@ def test_l2_routing_and_result_generation(mock_arjun_result):
     assert summary.needs_manual_review == 0
     assert summary.on_hold_missing_l2_transcript == 0
     assert summary.data_incomplete == 0
+    assert summary.candidates[0].risk_flags == ["Risk"]
 
     drive.move_folder.assert_called_once_with("cand1", "final_folder")
     result_payloads = [data for _, filename, data in written if filename == "l2_result.json"]
@@ -139,6 +140,7 @@ def test_missing_l2_transcript_sets_hold(mock_arjun_result):
     assert summary.evaluated == 0
     assert summary.on_hold_missing_l2_transcript == 1
     assert not drive.move_folder.called
+    assert summary.candidates[0].risk_flags == ["missing_l2_transcript"]
     status_entries = [data for _, filename, data in written if filename == processor.STATUS_FILENAME]
     assert status_entries[0]["status"] == processor.STATUS_ON_HOLD_MISSING_L2_TRANSCRIPT
 
@@ -150,6 +152,7 @@ def test_missing_resume_marks_data_incomplete(mock_arjun_result):
 
     assert summary.total_seen == 1
     assert summary.data_incomplete == 1
+    assert summary.candidates[0].risk_flags == ["data_incomplete"]
     status_entries = [data for _, filename, data in written if filename == processor.STATUS_FILENAME]
     assert status_entries[0]["status"] == processor.STATUS_DATA_INCOMPLETE
 

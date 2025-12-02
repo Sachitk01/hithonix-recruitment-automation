@@ -69,6 +69,7 @@ _RIVA_PIPELINE_INTENTS = {
     Intent.L1_EVAL_BATCH_STATUS,
     Intent.PIPELINE_STATUS,
     Intent.DEBUG,
+    Intent.WORK_QUERY,
 }
 
 
@@ -149,7 +150,7 @@ async def _handle_riva_dm(event: Dict[str, Any]) -> None:
 
     await _send_ack(channel, user)
     try:
-        await to_thread.run_sync(_run_riva_pipeline, text, channel, user)
+        await to_thread.run_sync(_run_riva_pipeline, text, channel, user, decision.intent)
     except Exception:  # pragma: no cover - guarded by tests
         logger.exception(
             "riva_dm_pipeline_crashed",
@@ -165,7 +166,7 @@ async def _handle_riva_app_mention(event: Dict[str, Any]) -> None:
 
     cleaned_text = _strip_bot_mention(text)
     await _send_ack(channel, user)
-    await to_thread.run_sync(_run_riva_pipeline, cleaned_text, channel, user)
+    await to_thread.run_sync(_run_riva_pipeline, cleaned_text, channel, user, Intent.WORK_QUERY)
 
 
 async def _send_ack(channel: Optional[str], user: Optional[str]) -> None:
@@ -191,9 +192,14 @@ def _post_riva_message(channel: Optional[str], text: str) -> None:
         riva_slack_client.post_message(text, channel=channel)
 
 
-def _run_riva_pipeline(text: str, channel: Optional[str], user: Optional[str]) -> None:
+def _run_riva_pipeline(
+    text: str,
+    channel: Optional[str],
+    user: Optional[str],
+    intent: Optional[Intent] = None,
+) -> None:
     try:
-        response = riva_bot.handle_command(text, channel)
+        response = riva_bot.handle_command(text, channel, intent=intent)
         logger.info(
             "riva_pipeline_complete",
             extra={"user": user, "channel": channel, "response_preview": (response or "")[:80]},

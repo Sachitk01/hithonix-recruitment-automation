@@ -11,6 +11,7 @@ class RivaL1Result(BaseModel):
     behavioral_signals: str
     communication_signals: str
     red_flags: List[str]
+    risk_flags: List[str] = Field(default_factory=list)
     compensation_alignment: str
     joining_feasibility: str
     fit_score: int
@@ -27,6 +28,16 @@ class L1CandidateResult(BaseModel):
     folder_link: Optional[str] = None
     feedback_link: Optional[str] = None
     dashboard_link: Optional[str] = None
+    risk_flags: List[str] = Field(default_factory=list)
+
+
+class L1BatchError(BaseModel):
+    candidate_name: Optional[str] = None
+    role: Optional[str] = None
+    folder_id: Optional[str] = None
+    error_code: str
+    error_message: str
+    technical_detail: Optional[str] = None
 
 
 class L1BatchSummary(BaseModel):
@@ -44,8 +55,12 @@ class L1BatchSummary(BaseModel):
     hold_ambiguous: int = 0
     hold_jd_mismatch: int = 0
     data_incomplete: int = 0
-    errors: int = 0
+    errors: List[L1BatchError] = Field(default_factory=list)
     candidates: List[L1CandidateResult] = Field(default_factory=list)
 
     def to_logging_dict(self) -> dict:
         return self.model_dump()
+
+    @property
+    def error_count(self) -> int:
+        return len(self.errors)

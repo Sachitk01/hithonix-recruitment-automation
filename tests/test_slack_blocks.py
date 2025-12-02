@@ -1,5 +1,6 @@
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import Mock
 from slack_blocks import (
     build_batch_summary_blocks,
@@ -46,7 +47,7 @@ def test_build_summary_stats_l1():
     summary.rejected_at_l1 = 0
     summary.needs_manual_review = 0
     summary.data_incomplete = 2
-    summary.errors = 5
+    summary.errors = [SimpleNamespace() for _ in range(5)]
     
     blocks = build_summary_stats(summary, "L1")
     
@@ -120,6 +121,44 @@ def test_build_candidate_row_with_hold_reason():
     assert "Reason:" in blocks[1]["elements"][0]["text"]
 
 
+def test_rejected_candidate_row_shows_risk_flags():
+    candidate = Mock()
+    candidate.candidate_name = "Aria"
+    candidate.role = "IT Support"
+    candidate.folder_link = None
+    candidate.feedback_link = None
+    candidate.dashboard_link = None
+    candidate.risk_flags = ["low_experience", "salary_mismatch", "culture_gap", "location_mismatch"]
+
+    blocks = build_candidate_row(candidate, "reject")
+
+    assert len(blocks) == 2  # section + risk context
+    risk_block = blocks[1]
+    assert risk_block["type"] == "context"
+    assert "Reasons:" in risk_block["elements"][0]["text"]
+    assert "low_experience" in risk_block["elements"][0]["text"]
+    assert "…" in risk_block["elements"][0]["text"]
+
+
+def test_hold_manual_review_row_shows_risk_flags():
+    candidate = Mock()
+    candidate.candidate_name = "Maya"
+    candidate.role = "IT Support"
+    candidate.folder_link = None
+    candidate.feedback_link = None
+    candidate.dashboard_link = None
+    candidate.reason = "manual review required"
+    candidate.hold_reason = "manual_review_required"
+    candidate.risk_flags = ["missing_non_critical_doc", "borderline_experience"]
+
+    blocks = build_candidate_row(candidate, "hold")
+
+    assert len(blocks) == 3  # section + reason + risk flags
+    risk_block = blocks[-1]
+    assert risk_block["type"] == "context"
+    assert "borderline_experience" in risk_block["elements"][0]["text"]
+
+
 def test_build_batch_summary_blocks_l1():
     """Test complete L1 batch summary."""
     summary = Mock()
@@ -129,7 +168,7 @@ def test_build_batch_summary_blocks_l1():
     summary.rejected_at_l1 = 0
     summary.needs_manual_review = 0
     summary.data_incomplete = 2
-    summary.errors = 5
+    summary.errors = [SimpleNamespace() for _ in range(5)]
     
     # Create mock candidates
     candidate1 = Mock()
@@ -203,7 +242,7 @@ def test_empty_batch():
     summary.rejected_at_l1 = 0
     summary.needs_manual_review = 0
     summary.data_incomplete = 0
-    summary.errors = 0
+    summary.errors = []
     summary.candidates = []
     
     blocks = build_batch_summary_blocks(summary, "L1")
@@ -211,3 +250,40 @@ def test_empty_batch():
     # Should still have header, stats, footer
     assert len(blocks) > 0
     assert blocks[0]["type"] == "header"
+
+
+def test_error_details_section_included_for_l1_summary():
+    summary = Mock()
+    summary.total_seen = 3
+    summary.evaluated = 1
+    summary.moved_to_l2 = 0
+    summary.rejected_at_l1 = 0
+    summary.needs_manual_review = 0
+    summary.data_incomplete = 0
+    summary.candidates = []
+    summary.errors = [
+        SimpleNamespace(
+            candidate_name=f"Candidate {i}",
+            role="IT Support",
+            folder_id=f"folder{i}",
+            error_code="drive_access_denied",
+            error_message="Service account missing access",
+        )
+        for i in range(4)
+    ]
+
+    blocks = build_batch_summary_blocks(summary, "L1")
+
+    error_sections = [
+        block
+        for block in blocks
+        if block.get("type") == "section"
+        and isinstance(block.get("text"), dict)
+        and "Errors detected" in block["text"].get("text", "")
+    ]
+
+    assert error_sections, "Expected errors section to be rendered"
+    text = error_sections[0]["text"]["text"]
+    assert "Candidate 0" in text
+    assert "Candidate 2" in text
+    assert "more errors" in text  # indicates truncation message

@@ -69,6 +69,7 @@ _ARJUN_PIPELINE_INTENTS = {
     Intent.L2_COMPARE,
     Intent.PIPELINE_STATUS,
     Intent.DEBUG,
+    Intent.WORK_QUERY,
 }
 
 
@@ -148,7 +149,7 @@ async def _handle_arjun_dm(event: Dict[str, Any]) -> None:
 
     await _send_ack(channel, user)
     try:
-        await to_thread.run_sync(_run_arjun_pipeline, text, channel, user)
+        await to_thread.run_sync(_run_arjun_pipeline, text, channel, user, decision.intent)
     except Exception:  # pragma: no cover - guarded by tests
         logger.exception(
             "arjun_dm_pipeline_crashed",
@@ -164,7 +165,7 @@ async def _handle_arjun_app_mention(event: Dict[str, Any]) -> None:
 
     cleaned_text = _strip_bot_mention(text)
     await _send_ack(channel, user)
-    await to_thread.run_sync(_run_arjun_pipeline, cleaned_text, channel, user)
+    await to_thread.run_sync(_run_arjun_pipeline, cleaned_text, channel, user, Intent.WORK_QUERY)
 
 
 async def _send_ack(channel: Optional[str], user: Optional[str]) -> None:
@@ -190,9 +191,14 @@ def _post_arjun_message(channel: Optional[str], text: str) -> None:
         arjun_slack_client.post_message(text, channel=channel)
 
 
-def _run_arjun_pipeline(text: str, channel: Optional[str], user: Optional[str]) -> None:
+def _run_arjun_pipeline(
+    text: str,
+    channel: Optional[str],
+    user: Optional[str],
+    intent: Optional[Intent] = None,
+) -> None:
     try:
-        response = arjun_bot.handle_command(text, channel)
+        response = arjun_bot.handle_command(text, channel, intent=intent)
         logger.info(
             "arjun_pipeline_complete",
             extra={"user": user, "channel": channel, "response_preview": (response or "")[:80]},

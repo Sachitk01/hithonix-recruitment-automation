@@ -43,7 +43,7 @@ async def test_arjun_dm_sends_ack_and_runs_pipeline(monkeypatch):
 
     pipeline_calls = []
 
-    def fake_pipeline(text, channel, user):
+    def fake_pipeline(text, channel, user, intent=None):
         pipeline_calls.append((text, channel, user))
 
     monkeypatch.setattr(handlers, "_run_arjun_pipeline", fake_pipeline)
